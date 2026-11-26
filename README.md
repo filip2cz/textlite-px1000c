@@ -19,7 +19,9 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `shell.nix` - Nix development shell with the compiler and audio tools
 
-`.github/workflows/main.yml` - GitHub Actions CI workflow for testing, cross-compilation, and draft releases
+`.github/workflows/main.yml` - GitHub Actions CI workflow for testing, multi-architecture cross-compilation (`decode`, `encode`, and static `sip`), QEMU smoke tests, and draft releases
+
+`.github/scripts/build_pjsip.sh` - CI helper script that builds minimal static PJSIP libraries for each target architecture
 
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
 

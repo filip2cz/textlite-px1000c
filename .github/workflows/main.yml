@@ -11,9 +11,12 @@ on:
 permissions:
   contents: write
 
+env:
+  PJSIP_VERSION: "2.16"
+
 jobs:
-  test-and-build-sip:
-    name: Test and build sip (x86_64 Nix)
+  test:
+    name: Run test suite
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -28,33 +31,40 @@ jobs:
         run: |
           nix-shell --run "./tests/run_tests.sh"
 
-      - name: Compile sip binary in nix-shell
-        run: |
-          mkdir -p build
-          nix-shell --run '
-            cc -std=c11 -O2 -Wall -Wextra -Werror sip.c -o build/sip-linux-x64 $(pkg-config --static --cflags --libs libpjproject) -pthread
-            build/sip-linux-x64 -h
-          '
-
-      - name: Upload sip binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: linux-sip-x86_64
-          path: build/sip-linux-x64
-          if-no-files-found: error
-
   build-x86:
     name: Build x86 binaries
-    needs: test-and-build-sip
+    needs: test
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install x86 toolchains
+      - name: Install x86 toolchains and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc gcc-multilib
+          sudo apt-get install --no-install-recommends -y gcc g++ gcc-multilib g++-multilib pkg-config make curl
+
+      - name: Download PJSIP source
+        run: |
+          curl -fsSL --retry 3 "https://github.com/pjsip/pjproject/archive/refs/tags/${PJSIP_VERSION}.tar.gz" -o /tmp/pjproject.tar.gz
+
+      - name: Build minimal static PJSIP for x86_64 and x86
+        run: |
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-x64 \
+            --cc gcc \
+            --cxx g++ \
+            --cflags "-O2"
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-x86 \
+            --host i686-linux-gnu \
+            --cc "gcc -m32" \
+            --cxx "g++ -m32" \
+            --ar ar \
+            --ranlib ranlib \
+            --cflags "-O2"
 
       - name: Compile x86 binaries
         run: |
@@ -63,6 +73,14 @@ jobs:
           gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-x86
           gcc -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-x64
           gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-x86
+
+          PJSIP_X64_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-x64/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_X64_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-x64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X64_CFLAGS sip.c $PJSIP_X64_LIBS -pthread -o build/sip-linux-x64
+
+          PJSIP_X86_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-x86/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_X86_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-x86/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X86_CFLAGS sip.c $PJSIP_X86_LIBS -pthread -o build/sip-linux-x86
 
       - name: Upload x86 binaries
         uses: actions/upload-artifact@v7
@@ -73,20 +91,46 @@ jobs:
             build/decode-linux-x86
             build/encode-linux-x64
             build/encode-linux-x86
+            build/sip-linux-x64
+            build/sip-linux-x86
           if-no-files-found: error
 
   build-arm:
     name: Build AArch64 and ARMv7 binaries
-    needs: test-and-build-sip
+    needs: test
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install ARM toolchains and development headers
+      - name: Install ARM toolchains and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf libc6-dev-arm64-cross libc6-dev-armhf-cross
+          sudo apt-get install --no-install-recommends -y \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf libc6-dev-armhf-cross \
+            pkg-config make curl
+
+      - name: Download PJSIP source
+        run: |
+          curl -fsSL --retry 3 "https://github.com/pjsip/pjproject/archive/refs/tags/${PJSIP_VERSION}.tar.gz" -o /tmp/pjproject.tar.gz
+
+      - name: Build minimal static PJSIP for AArch64 and ARMv7
+        run: |
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-aarch64 \
+            --host aarch64-linux-gnu \
+            --cc aarch64-linux-gnu-gcc \
+            --cxx aarch64-linux-gnu-g++ \
+            --cflags "-O2"
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-armv7l \
+            --host arm-linux-gnueabihf \
+            --cc arm-linux-gnueabihf-gcc \
+            --cxx arm-linux-gnueabihf-g++ \
+            --cflags "-march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -O2"
 
       - name: Compile AArch64 and ARMv7 binaries
         run: |
@@ -95,6 +139,14 @@ jobs:
           arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-armv7l
           aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-aarch64
           arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-armv7l
+
+          PJSIP_AARCH64_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-aarch64/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_AARCH64_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-aarch64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_AARCH64_CFLAGS sip.c $PJSIP_AARCH64_LIBS -pthread -o build/sip-linux-aarch64
+
+          PJSIP_ARMV7_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv7l/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_ARMV7_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv7l/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV7_CFLAGS sip.c $PJSIP_ARMV7_LIBS -pthread -o build/sip-linux-armv7l
 
       - name: Upload AArch64 and ARMv7 binaries
         uses: actions/upload-artifact@v7
@@ -105,62 +157,108 @@ jobs:
             build/decode-linux-armv7l
             build/encode-linux-aarch64
             build/encode-linux-armv7l
+            build/sip-linux-aarch64
+            build/sip-linux-armv7l
           if-no-files-found: error
 
   build-armv5:
-    name: Build ARMv5 binary
-    needs: test-and-build-sip
+    name: Build ARMv5 binaries
+    needs: test
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install ARMv5 toolchain and development headers
+      - name: Install ARMv5 toolchain and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-arm-linux-gnueabi libc6-dev-armel-cross
+          sudo apt-get install --no-install-recommends -y \
+            gcc-arm-linux-gnueabi g++-arm-linux-gnueabi libc6-dev-armel-cross \
+            pkg-config make curl
 
-      - name: Compile ARMv5 binary
+      - name: Download PJSIP source
+        run: |
+          curl -fsSL --retry 3 "https://github.com/pjsip/pjproject/archive/refs/tags/${PJSIP_VERSION}.tar.gz" -o /tmp/pjproject.tar.gz
+
+      - name: Build minimal static PJSIP for ARMv5
+        run: |
+          # Build pjproject as C99 so os_core_unix.c uses mutex-emulated atomics
+          # instead of stdatomic helpers that require libatomic on ARMv5.
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-armv5te \
+            --host arm-linux-gnueabi \
+            --cc arm-linux-gnueabi-gcc \
+            --cxx arm-linux-gnueabi-g++ \
+            --cflags "-march=armv5te -O2 -std=gnu99"
+
+      - name: Compile ARMv5 binaries
         run: |
           mkdir -p build
           arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-armv5te
           arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-armv5te
 
-      - name: Upload ARMv5 binary
+          PJSIP_ARMV5_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv5te/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_ARMV5_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv5te/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV5_CFLAGS sip.c $PJSIP_ARMV5_LIBS -pthread -o build/sip-linux-armv5te
+
+      - name: Upload ARMv5 binaries
         uses: actions/upload-artifact@v7
         with:
           name: linux-armv5
           path: |
             build/decode-linux-armv5te
             build/encode-linux-armv5te
+            build/sip-linux-armv5te
           if-no-files-found: error
 
   build-riscv64:
-    name: Build RISC-V 64-bit binary
-    needs: test-and-build-sip
+    name: Build RISC-V 64-bit binaries
+    needs: test
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
         uses: actions/checkout@v6
 
-      - name: Install RISC-V toolchain and development headers
+      - name: Install RISC-V toolchain and build tools
         run: |
           sudo apt-get update
-          sudo apt-get install --no-install-recommends -y gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+          sudo apt-get install --no-install-recommends -y \
+            gcc-riscv64-linux-gnu g++-riscv64-linux-gnu libc6-dev-riscv64-cross \
+            pkg-config make curl
 
-      - name: Compile RISC-V 64-bit binary
+      - name: Download PJSIP source
+        run: |
+          curl -fsSL --retry 3 "https://github.com/pjsip/pjproject/archive/refs/tags/${PJSIP_VERSION}.tar.gz" -o /tmp/pjproject.tar.gz
+
+      - name: Build minimal static PJSIP for RISC-V 64-bit
+        run: |
+          .github/scripts/build_pjsip.sh \
+            --tarball /tmp/pjproject.tar.gz \
+            --prefix /tmp/pjsip-riscv64 \
+            --host riscv64-linux-gnu \
+            --cc riscv64-linux-gnu-gcc \
+            --cxx riscv64-linux-gnu-g++ \
+            --cflags "-march=rv64gc -mabi=lp64d -O2"
+
+      - name: Compile RISC-V 64-bit binaries
         run: |
           mkdir -p build
           riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-riscv64
           riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-riscv64
 
-      - name: Upload RISC-V binary
+          PJSIP_RISCV_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-riscv64/lib/pkgconfig pkg-config --static --cflags libpjproject)
+          PJSIP_RISCV_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-riscv64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
+          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_RISCV_CFLAGS sip.c $PJSIP_RISCV_LIBS -pthread -o build/sip-linux-riscv64
+
+      - name: Upload RISC-V binaries
         uses: actions/upload-artifact@v7
         with:
           name: linux-riscv64
           path: |
             build/decode-linux-riscv64
             build/encode-linux-riscv64
+            build/sip-linux-riscv64
           if-no-files-found: error
 
   verify-binaries:
@@ -212,20 +310,29 @@ jobs:
           check_help encode-linux-armv5te "Usage: .*encode" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/encode-linux-armv5te
           check_help encode-linux-riscv64 "Usage: .*encode" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/encode-linux-riscv64
 
+          check_help sip-linux-x64 "Usage: .*sip" ./build/sip-linux-x64
+          check_help sip-linux-x86 "Usage: .*sip" ./build/sip-linux-x86
+          check_help sip-linux-aarch64 "Usage: .*sip" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/sip-linux-aarch64
+          check_help sip-linux-armv7l "Usage: .*sip" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/sip-linux-armv7l
+          check_help sip-linux-armv5te "Usage: .*sip" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/sip-linux-armv5te
+          check_help sip-linux-riscv64 "Usage: .*sip" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/sip-linux-riscv64
+
           for binary in build/*-linux-*; do
             test -s "$binary"
           done
 
-          readelf -h build/decode-linux-riscv64 > /tmp/decode-linux-riscv64-elf.txt
-          grep -q 'Class:.*ELF64' /tmp/decode-linux-riscv64-elf.txt
-          grep -q 'Machine:.*RISC-V' /tmp/decode-linux-riscv64-elf.txt
-          echo "PASS: decode-linux-riscv64 ELF format and architecture"
+          for binary in build/decode-linux-riscv64 build/sip-linux-riscv64; do
+            readelf -h "$binary" > /tmp/riscv64-elf.txt
+            grep -q 'Class:.*ELF64' /tmp/riscv64-elf.txt
+            grep -q 'Machine:.*RISC-V' /tmp/riscv64-elf.txt
+            echo "PASS: $binary ELF format and architecture"
+          done
 
   release:
     name: Create draft release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
-      - test-and-build-sip
+      - test
       - verify-binaries
     runs-on: ubuntu-24.04
     permissions:
