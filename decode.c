@@ -1,3 +1,4 @@
+/* Decode TEXT LITE PX1000 C FSK transmissions from audio files. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
@@ -245,6 +246,8 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
         return best;
 
     double rms_gate = fmax(200.0, max_rms * 0.06);
+    /* Shorter high-speed windows separate the tones less sharply, so the
+       confidence threshold is adjusted for each baud rate. */
     double confidence_gate = baud_rate == 300 ? 0.22
                            : baud_rate == 600 ? 0.10 : 0.035;
     unsigned char *run = malloc(symbol_count / FRAME_BITS + 2);
@@ -258,6 +261,8 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
          period <= nominal_period * 1.0075;
          period += period_step) {
         for (double phase = 0.0; phase < period; phase += 0.5) {
+            /* Each phase/period pair defines a candidate sampling clock;
+               bit_offset checks every possible 11-bit frame alignment. */
             size_t bit_count = (size_t)((symbol_count - window_size) / period);
             for (size_t bit_offset = 0; bit_offset < FRAME_BITS; ++bit_offset) {
                 size_t run_count = 0;
@@ -285,6 +290,8 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
                         value |= (unsigned char)(bits[j + 1] << j);
                     unsigned ones = (unsigned)__builtin_popcount((unsigned)value)
                                   + bits[8];
+                    /* Even parity covers the seven data bits and parity bit;
+                       both stop bits must decode as MARK. */
                     int valid = active && bits[0] == 0 && (ones & 1U) == 0
                              && bits[9] == 1 && bits[10] == 1;
                     if (valid) {

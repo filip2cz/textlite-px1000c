@@ -1,3 +1,4 @@
+/* Encode 7-bit text as a TEXT LITE PX1000 C FSK audio transmission. */
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
@@ -197,6 +198,8 @@ static int parse_speech_wav(const unsigned char *wav, size_t wav_length,
     speech->data_size = 0;
     speech->sample_rate = 0;
     speech->channels = 0;
+    /* RIFF permits intervening chunks, and pads odd-sized payloads to the
+       next even-byte boundary. */
     while (offset + 8 <= wav_length) {
         const unsigned char *chunk = wav + offset;
         uint32_t chunk_size = get_u32le(chunk + 4);
@@ -231,6 +234,7 @@ static int parse_speech_wav(const unsigned char *wav, size_t wav_length,
 
 static int16_t read_speech_frame(const SpeechWav *speech, size_t frame)
 {
+    /* Average channels before interpolation to keep the output mono. */
     int32_t sum = 0;
     for (uint16_t channel = 0; channel < speech->channels; ++channel) {
         size_t index = (frame * speech->channels + channel) * 2;
@@ -248,6 +252,8 @@ static int append_speech(AudioWriter *writer, const SpeechWav *speech)
         return -1;
     uint64_t output_frames = (uint64_t)llround(
         (double)source_frames * SAMPLE_RATE / speech->sample_rate);
+    /* Map each output frame back to the source timeline and blend its two
+       neighboring frames to resample speech to 44.1 kHz. */
     for (uint64_t i = 0; i < output_frames; ++i) {
         double source_position = (double)i * speech->sample_rate / SAMPLE_RATE;
         size_t first = (size_t)source_position;
@@ -519,6 +525,8 @@ static int encode(const char *output_path, const unsigned char *text,
         free(speech_wav);
         return -1;
     }
+    /* The final RIFF/data sizes are not known until PCM streaming finishes,
+       so write a placeholder header and replace it after the byte count is known. */
     unsigned char empty_header[44] = {0};
     if (fwrite(empty_header, 1, sizeof(empty_header), file) != sizeof(empty_header)) {
         perror("write");

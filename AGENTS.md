@@ -4,6 +4,9 @@
 
 - Keep the program and all user-facing output in English.
 - Write source-code comments in English.
+- Start each C source file with a concise comment describing its purpose.
+- Use concise source comments for protocol details, non-obvious algorithms, and
+  cross-thread ownership; avoid narrating straightforward code.
 - For every code, configuration, or documentation change, update both
   `AGENTS.md` and `README.md` in the same change. Keep this architecture
   description and the README's user instructions in sync with the code.
@@ -147,7 +150,9 @@ worker disconnects and destroys the player and sends BYE. The temporary WAV is
 removed on both success and failure. A failed command, encoder, media setup, or
 playback also ends the accepted call. PJSUA callbacks only update synchronized
 call state; command execution, encoding, waiting for playback completion, and
-cleanup run in the worker. The sound device is replaced by PJSUA's null device
+cleanup run in the worker. Shared call state is protected by a mutex and
+condition variable. The command runs in its own process group so shutdown can
+stop shell descendants. The sound device is replaced by PJSUA's null device
 so no local microphone or speaker is needed. VAD and echo cancellation are
 disabled, and waveform codecs (`PCMA`, `PCMU`, `G722`) are prioritized over
 low-bitrate speech vocoders so FSK tones are preserved.

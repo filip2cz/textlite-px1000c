@@ -31,7 +31,9 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 The encoder/decoder pipelines and coding conventions are documented in
 [AGENTS.md](AGENTS.md). Keep `AGENTS.md` and this README updated together with
-every code, configuration, or documentation change.
+every code, configuration, or documentation change. C source comments explain
+the file's purpose at the top, along with protocol details, non-obvious
+algorithms, and cross-thread ownership where relevant.
 
 ## Nix development shell
 
@@ -110,7 +112,10 @@ call at a time. It runs the selected shell command, passes its standard output
 to `encode`, plays the resulting WAV into the call, and hangs up when playback
 finishes. Command output must be valid encoder input and is limited to 7,400
 bytes. If another call arrives while one is being handled, it is rejected as
-busy. The command is executed by `/bin/sh -c`.
+busy. The command is executed by `/bin/sh -c` in its own process group, so
+shutdown can stop shell descendants. PJSUA callbacks update mutex-protected
+call state; a worker thread handles command execution, encoding, playback, and
+cleanup.
 
 Build it inside `nix-shell`:
 
