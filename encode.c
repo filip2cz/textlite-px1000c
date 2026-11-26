@@ -68,6 +68,7 @@ static uint32_t get_u32le(const unsigned char *input)
 }
 
 static int synthesize_speech(const unsigned char *text, size_t text_length,
+                             const char *language,
                              unsigned char **wav_out, size_t *wav_length_out)
 {
     /* eSpeak NG writes a PCM WAV to stdout; capture it without invoking a shell. */
@@ -104,8 +105,12 @@ static int synthesize_speech(const unsigned char *text, size_t text_length,
             _exit(127);
         }
         close(pipefd[1]);
-        execlp("espeak-ng", "espeak-ng", "--stdout", "-z", "--",
-               spoken_text, (char *)NULL);
+        if (language != NULL)
+            execlp("espeak-ng", "espeak-ng", "--stdout", "-z", "-v",
+                   language, "--", spoken_text, (char *)NULL);
+        else
+            execlp("espeak-ng", "espeak-ng", "--stdout", "-z", "--",
+                   spoken_text, (char *)NULL);
         perror("espeak-ng");
         _exit(127);
     }
@@ -491,13 +496,15 @@ static int parse_gap(const char *text, double *gap_out)
 
 static int encode(const char *output_path, const unsigned char *text,
                   size_t text_length, unsigned margin, unsigned baud_rate,
-                  int speak_enabled, double gap_seconds)
+                  int speak_enabled, const char *speech_language,
+                  double gap_seconds)
 {
     unsigned char *speech_wav = NULL;
     size_t speech_wav_length = 0;
     SpeechWav speech = {0};
     if (speak_enabled) {
-        if (synthesize_speech(text, text_length, &speech_wav, &speech_wav_length) != 0)
+        if (synthesize_speech(text, text_length, speech_language,
+                              &speech_wav, &speech_wav_length) != 0)
             return -1;
         if (parse_speech_wav(speech_wav, speech_wav_length, &speech) != 0) {
             fprintf(stderr, "eSpeak NG produced an unsupported WAV format.\n");
@@ -576,12 +583,13 @@ static int encode(const char *output_path, const unsigned char *text,
 
 static void print_usage(const char *program)
 {
-    fprintf(stderr, "Usage: %s [-o output.wav] [-m margin] [-b baud] [-s] [-g seconds] [text]\n", program);
+    fprintf(stderr, "Usage: %s [-o output.wav] [-m margin] [-b baud] [-s] [-l language] [-g seconds] [text]\n", program);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  -o output.wav  Output WAV path (default: encoded.wav).\n");
     fprintf(stderr, "  -m margin      Margin byte, from 0 to 127 (default: 40).\n");
     fprintf(stderr, "  -b baud        Baud rate: 300, 600, or 1200 (default: 300).\n");
     fprintf(stderr, "  -s, --speak    Read the text before the encoded transmission (requires espeak-ng).\n");
+    fprintf(stderr, "  -l, --lang id  eSpeak NG language/voice code (default: eSpeak NG default).\n");
     fprintf(stderr, "  -g, --gap sec  Silence after speech before transmission (0 to 600, default: 3).\n");
     fprintf(stderr, "  --             Treat following arguments as text.\n");
     fprintf(stderr, "  text           Text to encode; multiple arguments are joined with spaces.\n");
@@ -594,6 +602,7 @@ int main(int argc, char **argv)
     unsigned margin = 40;
     unsigned baud_rate = 300;
     int speak_enabled = 0;
+    const char *speech_language = NULL;
     double gap_seconds = 3.0;
     int index = 1;
     while (index < argc && argv[index][0] == '-') {
@@ -619,6 +628,14 @@ int main(int argc, char **argv)
                    strcmp(argv[index], "--speak") == 0) {
             speak_enabled = 1;
             ++index;
+        } else if ((strcmp(argv[index], "-l") == 0 ||
+                    strcmp(argv[index], "--lang") == 0) && index + 1 < argc) {
+            if (argv[index + 1][0] == '\0' || argv[index + 1][0] == '-') {
+                fprintf(stderr, "Language must be an eSpeak NG voice code, such as cs or en-us.\n");
+                return 2;
+            }
+            speech_language = argv[index + 1];
+            index += 2;
         } else if ((strcmp(argv[index], "-g") == 0 ||
                     strcmp(argv[index], "--gap") == 0) && index + 1 < argc) {
             if (parse_gap(argv[index + 1], &gap_seconds) != 0) {
@@ -685,7 +702,7 @@ int main(int argc, char **argv)
         return 1;
 
     int result = encode(output_path, text, text_length, margin, baud_rate,
-                        speak_enabled, gap_seconds);
+                        speak_enabled, speech_language, gap_seconds);
     free(text);
     if (result != 0)
         return 1;

@@ -72,6 +72,9 @@ eSpeak NG to be installed and available as `espeak-ng`. The default silence
 between the spoken text and transmission is 3 seconds. Set it with `-g` or
 `--gap`, using a value from 0 to 600 seconds. The encoder accepts eSpeak NG's
 streamed WAV output and converts it to the output file's mono 44.1 kHz format.
+Select the speech language with `-l` or `--lang`, using an eSpeak NG voice code
+such as `cs` or `en-us`; without it, eSpeak NG's default voice is used. List
+available codes with `espeak-ng --voices`.
 
 Build and encode a message:
 
@@ -80,6 +83,7 @@ cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 ./encode -o message.wav "test abc123"
 ./encode -b 1200 -o message.wav "test abc123"
 ./encode --speak --gap 3 -o message.wav "test abc123"
+./encode --speak --lang cs -o message.wav "test abc123"
 ```
 
 If the text argument is omitted, the encoder reads text from redirected standard

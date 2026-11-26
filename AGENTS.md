@@ -97,7 +97,9 @@ unencrypted text path.
 
 When `-s` or `--speak` is selected, `synthesize_speech` runs the optional
 `espeak-ng` executable as a child process without a shell and captures its WAV
-output through a pipe. The parent parses RIFF PCM chunks, accepts mono or
+output through a pipe. If `-l` or `--lang` is supplied, its eSpeak NG voice or
+language code is passed to eSpeak NG as `-v`; otherwise eSpeak NG chooses its
+default voice. The parent parses RIFF PCM chunks, accepts mono or
 stereo 16-bit PCM at 8,000 to 192,000 Hz, downmixes stereo to mono, and
 linearly resamples speech to the encoder's 44,100 Hz rate. eSpeak NG's WAV
 stream uses placeholder RIFF/data sizes, so a data chunk declaring more bytes
@@ -111,9 +113,10 @@ tabs become spaces. Without `--speak`, encoding does not invoke a TTS program.
 The encoder defaults to 300 baud and `encoded.wav`; `-b` selects 300, 600, or
 1200 baud, while `-o` selects another output path. `-m` selects the margin
 byte. `-s` enables speech and `-g` sets the silence after it. Invalid command
-lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `-s`, `-g`,
-`--`, and text/stdin input. It does not depend on FFmpeg because it writes PCM
-WAV directly; eSpeak NG is required only for the optional speech path.
+lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `-s`, `-l`,
+`-g`, `--`, and text/stdin input. It does not depend on FFmpeg because it
+writes PCM WAV directly; eSpeak NG is required only for the optional speech
+path.
 
 ### 7. Memory and process cleanup
 
@@ -158,5 +161,6 @@ Pass text directly, or omit it to read from standard input:
 ./encode -o message.wav "test abc123"
 ./encode -b 1200 -o message.wav "test abc123"
 ./encode --speak --gap 3 -o message.wav "test abc123"
+./encode --speak --lang cs -o message.wav "test abc123"
 printf '%s' "test abc123" | ./encode -o message.wav
 ```
