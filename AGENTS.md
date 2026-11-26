@@ -22,7 +22,9 @@ application framework or audio library.
 before or after the path. It coordinates input conversion, signal
 demodulation, frame search, and text output. Errors and usage information go
 to standard error; decoded text goes to standard output. The detected baud
-rate is written to standard error only when `-v` is supplied.
+rate is written to standard error only when `-v` is supplied. Invalid command
+lines print the usage syntax and a short summary of the `-v`, `--`, and input
+path arguments.
 
 ### 2. Audio input and normalization
 
@@ -77,7 +79,10 @@ padding. Printable ASCII text is written to standard output.
 `encode.c` accepts text as command-line arguments or from standard input. It
 validates 7-bit printable ASCII (plus tabs and line breaks), normalizes line
 endings to carriage returns, and appends the PX text terminator. The default
-margin byte is 40; `-m` can choose another value from 0 to 127.
+margin byte is 40; `-m` can choose another value from 0 to 127. Invalid
+command lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `--`,
+and text/stdin input. If text is omitted, redirected stdin is read; an
+interactive or empty stdin produces the usage help instead.
 
 The encoder writes a RIFF WAV file containing mono, signed 16-bit PCM at
 44,100 Hz. Its `AudioWriter` emits continuous-phase FSK samples at 300, 600,

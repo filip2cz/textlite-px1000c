@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 enum {
     SAMPLE_RATE = 44100,
@@ -316,7 +317,12 @@ static int encode(const char *output_path, const unsigned char *text,
 static void print_usage(const char *program)
 {
     fprintf(stderr, "Usage: %s [-o output.wav] [-m margin] [-b baud] [text]\n", program);
-    fprintf(stderr, "Baud rate must be 300, 600, or 1200 (default: 300).\n");
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -o output.wav  Output WAV path (default: encoded.wav).\n");
+    fprintf(stderr, "  -m margin      Margin byte, from 0 to 127 (default: 40).\n");
+    fprintf(stderr, "  -b baud        Baud rate: 300, 600, or 1200 (default: 300).\n");
+    fprintf(stderr, "  --             Treat following arguments as text.\n");
+    fprintf(stderr, "  text           Text to encode; multiple arguments are joined with spaces.\n");
     fprintf(stderr, "If text is omitted, it is read from standard input.\n");
 }
 
@@ -373,9 +379,27 @@ int main(int argc, char **argv)
             if (i + 1 < argc)
                 raw_text[raw_length++] = ' ';
         }
-    } else if (read_text_stdin(&raw_text, &raw_length) != 0) {
-        fprintf(stderr, "Could not read input text.\n");
-        return 1;
+    } else {
+        if (isatty(STDIN_FILENO)) {
+            print_usage(argv[0]);
+            return 2;
+        }
+        if (read_text_stdin(&raw_text, &raw_length) != 0) {
+            fprintf(stderr, "Could not read input text.\n");
+            return 1;
+        }
+    }
+    int has_text_content = 0;
+    for (size_t i = 0; i < raw_length; ++i) {
+        if (raw_text[i] != '\r' && raw_text[i] != '\n') {
+            has_text_content = 1;
+            break;
+        }
+    }
+    if (!has_text_content) {
+        free(raw_text);
+        print_usage(argv[0]);
+        return 2;
     }
 
     unsigned char *text = NULL;

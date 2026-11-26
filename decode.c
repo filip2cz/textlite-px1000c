@@ -338,6 +338,15 @@ static int print_message(const Candidate *candidate)
     return wrote;
 }
 
+static void print_usage(const char *program)
+{
+    fprintf(stderr, "Usage: %s [-v] [--] audio_file\n", program);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  -v        Print the detected baud rate to standard error.\n");
+    fprintf(stderr, "  --        Treat following arguments as the audio file path.\n");
+    fprintf(stderr, "  audio_file  Input audio in any format supported by FFmpeg.\n");
+}
+
 int main(int argc, char **argv)
 {
     const char *input_path = NULL;
@@ -360,9 +369,7 @@ int main(int argc, char **argv)
     }
 
     if (input_path == NULL) {
-        fprintf(stderr, "Usage: %s [-v] [--] audio_file\n", argv[0]);
-        fprintf(stderr, "Use -v to print the detected baud rate.\n");
-        fprintf(stderr, "Input may be any audio format supported by FFmpeg.\n");
+        print_usage(argv[0]);
         return 2;
     }
 

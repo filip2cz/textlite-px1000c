@@ -39,6 +39,8 @@ FFmpeg must be installed and available as `ffmpeg` on `PATH`. Then run:
 ./decode -v test_abc123-1200Bd.mp3
 ```
 
+An invalid invocation prints the decoder's usage and option summary to standard error.
+
 ## Encode text
 
 `encode.c` writes a mono, 16-bit PCM WAV file at 44.1 kHz. It accepts printable
@@ -55,4 +57,6 @@ cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 ./encode -b 1200 -o message.wav "test abc123"
 ```
 
-If the text argument is omitted, the encoder reads text from standard input.
+If the text argument is omitted, the encoder reads text from redirected standard
+input. When run interactively without text, or with empty input, it prints the
+encoder's usage, options, and defaults to standard error.
