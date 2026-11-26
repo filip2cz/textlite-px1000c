@@ -5,5 +5,9 @@ pkgs.mkShell {
     stdenv.cc
     ffmpeg
     espeak-ng
+    pjsip
+    pkg-config
+    openssl
+    alsa-lib
   ];
 }

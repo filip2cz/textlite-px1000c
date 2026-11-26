@@ -14,9 +14,9 @@
 
 ## Project architecture
 
-The project contains two small POSIX C command-line tools. `decode.c` and
-`encode.c` implement the receive and send paths; there is no separate
-application framework or audio library.
+The project contains three POSIX C command-line tools. `decode.c` and
+`encode.c` implement the audio receive and send paths. `sip.c` uses PJSIP for
+SIP signaling and audio transport, and connects incoming calls to the encoder.
 
 ### 1. Command-line entry point
 
@@ -82,8 +82,8 @@ padding. Printable ASCII text is written to standard output.
 validates 7-bit printable ASCII (plus tabs and line breaks), normalizes line
 endings to carriage returns, and appends the PX text terminator. The default
 margin byte is 40; `-m` can choose another value from 0 to 127. Invalid
-command lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `--`,
-and text/stdin input. If text is omitted, redirected stdin is read; an
+command lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `-s`,
+`-l`, `-g`, `--`, and text/stdin input. If text is omitted, redirected stdin is read; an
 interactive or empty stdin produces the usage help instead.
 
 The encoder writes a RIFF WAV file containing mono, signed 16-bit PCM at
@@ -126,13 +126,42 @@ waited for, and a non-zero child status is treated as an input error. The
 encoder also waits for the optional eSpeak NG child and rejects failed speech
 synthesis or unsupported speech WAV data.
 
-### 8. Nix development shell
+### 8. SIP call responder
+
+`sip.c` is a UDP SIP user agent built on PJSIP's PJSUA C API. It registers one
+account, accepts one incoming call at a time, and rejects a concurrent call as
+busy. A POSIX worker thread runs the configured `/bin/sh -c` command, captures
+up to 7,400 bytes from stdout, and sends that text to the separate `encode`
+executable through stdin. The encoder writes a temporary mono PCM WAV file.
+
+After the call's audio media becomes active, the worker creates a PJSUA WAV
+player, registers a `pjmedia_wav_player_set_eof_cb2` completion callback, and
+connects the player's conference port to the call's audio transmit slot. When
+the WAV finishes playing (after a short tail delay for RTP flushing), the
+worker disconnects and destroys the player and sends BYE. The temporary WAV is
+removed on both success and failure. A failed command, encoder, media setup, or
+playback also ends the accepted call. PJSUA callbacks only update synchronized
+call state; command execution, encoding, waiting for playback completion, and
+cleanup run in the worker. The sound device is replaced by PJSUA's null device
+so no local microphone or speaker is needed. VAD and echo cancellation are
+disabled, and waveform codecs (`PCMA`, `PCMU`, `G722`) are prioritized over
+low-bitrate speech vocoders so FSK tones are preserved.
+
+The SIP program requires a registrar URI, account identity URI, authentication
+username, and command. A password may be supplied through `SIP_PASSWORD` or
+`--password`. The encoder path defaults to `./encode`, the baud rate to 300,
+and the local UDP SIP port to 0 (ephemeral port). Other supported baud rates are 600 and
+1200. Build using PJSIP's `libpjproject` pkg-config metadata.
+
+### 9. Nix development shell
 
 `shell.nix` defines a `pkgs.mkShell` environment containing the Nixpkgs C
-compiler, FFmpeg, and eSpeak NG. FFmpeg is needed by the decoder at runtime;
-eSpeak NG is needed only when the encoder's speech option is used. Enter the
-shell from the project directory with `nix-shell`. Keep this dependency list
-consistent with the runtime requirements in this file and `README.md`.
+compiler, FFmpeg, eSpeak NG, PJSIP, pkg-config, OpenSSL, and ALSA link
+libraries.
+FFmpeg is needed by the decoder at runtime; eSpeak NG is needed only when the
+encoder's speech option is used; PJSIP is needed by `sip`. Enter the shell from
+the project directory with `nix-shell`. Keep this dependency list consistent
+with the runtime requirements in this file and `README.md`.
 
 ## Build and run
 
@@ -163,4 +192,10 @@ Pass text directly, or omit it to read from standard input:
 ./encode --speak --gap 3 -o message.wav "test abc123"
 ./encode --speak --lang cs -o message.wav "test abc123"
 printf '%s' "test abc123" | ./encode -o message.wav
+```
+
+Build the SIP responder in the Nix shell with PJSIP's supplied link flags:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra sip.c -o sip $(pkg-config --static --cflags --libs libpjproject) -pthread
 ```

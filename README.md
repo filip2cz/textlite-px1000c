@@ -11,6 +11,8 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `encode.c` - C command-line encoder from text to PX1000 C audio
 
+`sip.c` - SIP client that answers calls with command-generated PX audio
+
 `shell.nix` - Nix development shell with the compiler and audio tools
 
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
@@ -31,9 +33,9 @@ Enter the project shell with:
 nix-shell
 ```
 
-It provides a C compiler, FFmpeg for decoding, and eSpeak NG for the optional
-`encode --speak` feature. Build either program with the commands below while
-inside the shell.
+It provides a C compiler, FFmpeg for decoding, eSpeak NG for the optional
+`encode --speak` feature, and PJSIP plus its build tools for `sip`. Build the
+programs with the commands below while inside the shell.
 
 ## Decode a recording
 
@@ -93,6 +95,38 @@ message text before the encoded transmission; the gap setting controls the
 silence between them. The encoded text's terminating carriage returns are not
 spoken.
 
+## Answer SIP calls with an encoded message
+
+`sip.c` registers a SIP account over UDP and automatically answers one incoming
+call at a time. It runs the selected shell command, passes its standard output
+to `encode`, plays the resulting WAV into the call, and hangs up when playback
+finishes. Command output must be valid encoder input and is limited to 7,400
+bytes. If another call arrives while one is being handled, it is rejected as
+busy. The command is executed by `/bin/sh -c`.
+
+Build it inside `nix-shell`:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra sip.c -o sip $(pkg-config --static --cflags --libs libpjproject) -pthread
+```
+
+Set the SIP password in the environment, then start the client:
+
+```sh
+export SIP_PASSWORD='your-sip-password'
+./sip --registrar sip:pbx.example.net \
+  --identity sip:1001@pbx.example.net --username 1001 \
+  --command 'printf "%s\\n" "test abc123"' --encoder ./encode
+```
+
+`--registrar`, `--identity`, `--username`, and `--command` are required. The
+password may instead be supplied with `--password`. The local SIP UDP port
+defaults to 0 (automatically picking an available ephemeral port); use
+`--port N` to bind a specific port. The baud rate defaults to 300 and accepts
+300, 600, or 1200. To preserve FSK modem tones, `sip` disables VAD and echo
+cancellation and prefers waveform codecs (`PCMA`, `PCMU`, `G.722`) over speech
+vocoders. Stop the client with Ctrl+C.
+
 ## Development note
 
 This project was vibecoded with OpenAI Codex using the GPT-6 Luna model.
@@ -103,4 +137,4 @@ and the [PX 1000 C operating instructions](https://www.manualslib.com/manual/345
 
 At runtime, `decode` requires FFmpeg. `encode` writes WAV directly and does not
 require FFmpeg or Python. eSpeak NG is an optional runtime dependency when
-`encode --speak` is used.
+`encode --speak` is used. `sip` requires PJSIP and the `encode` executable.
