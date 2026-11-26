@@ -21,11 +21,10 @@ every code, configuration, or documentation change.
 The decoder accepts audio formats supported by FFmpeg. It converts the input
 to mono, 16-bit PCM at 22,050 Hz before demodulating the 1300/1700 Hz FSK
 signal recorded at 300, 600, or 1200 baud. The decoder checks all three
-speeds automatically using rate-specific detection windows and reports the
-detected rate to standard error. For a
-new recording, lossless WAV with mono,
-16-bit PCM at 44.1 kHz is a good interchange format; the decoder will resample
-it internally.
+speeds automatically using rate-specific detection windows. By default it
+prints only the decoded text; add `-v` to report the detected rate to standard
+error. For a new recording, lossless WAV with mono, 16-bit PCM at 44.1 kHz is
+a good interchange format; the decoder will resample it internally.
 
 Build it with a C compiler and the math library:
 
@@ -36,7 +35,8 @@ cc -std=c11 -O2 -Wall -Wextra decode.c -lm -o decode
 FFmpeg must be installed and available as `ffmpeg` on `PATH`. Then run:
 
 ```sh
-./decode test_abc123.mp3
+./decode test_abc123-300Bd.mp3
+./decode -v test_abc123-1200Bd.mp3
 ```
 
 ## Encode text

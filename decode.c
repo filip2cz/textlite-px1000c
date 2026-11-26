@@ -340,15 +340,35 @@ static int print_message(const Candidate *candidate)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s audio_file\n", argv[0]);
+    const char *input_path = NULL;
+    int verbose = 0;
+    int parse_options = 1;
+    for (int i = 1; i < argc; ++i) {
+        if (parse_options && strcmp(argv[i], "--") == 0) {
+            parse_options = 0;
+        } else if (parse_options && strcmp(argv[i], "-v") == 0) {
+            verbose = 1;
+        } else if (parse_options && argv[i][0] == '-') {
+            input_path = NULL;
+            break;
+        } else if (input_path == NULL) {
+            input_path = argv[i];
+        } else {
+            input_path = NULL;
+            break;
+        }
+    }
+
+    if (input_path == NULL) {
+        fprintf(stderr, "Usage: %s [-v] [--] audio_file\n", argv[0]);
+        fprintf(stderr, "Use -v to print the detected baud rate.\n");
         fprintf(stderr, "Input may be any audio format supported by FFmpeg.\n");
         return 2;
     }
 
     int16_t *samples = NULL;
     size_t sample_count = 0;
-    if (read_ffmpeg_pcm(argv[1], &samples, &sample_count) != 0)
+    if (read_ffmpeg_pcm(input_path, &samples, &sample_count) != 0)
         return 1;
 
     /* Try each selectable modem speed with a bit window sized for that rate. */
@@ -383,7 +403,8 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    fprintf(stderr, "Detected transmission at %u baud.\n", message.baud_rate);
+    if (verbose)
+        fprintf(stderr, "Detected transmission at %u baud.\n", message.baud_rate);
     int wrote = print_message(&message);
     free(message.bytes);
     if (!wrote) {

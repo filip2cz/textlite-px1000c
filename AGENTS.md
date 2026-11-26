@@ -18,9 +18,11 @@ application framework or audio library.
 
 ### 1. Command-line entry point
 
-`main` accepts one audio-file path. It coordinates input conversion, signal
+`main` accepts one audio-file path and an optional `-v` flag, which may appear
+before or after the path. It coordinates input conversion, signal
 demodulation, frame search, and text output. Errors and usage information go
-to standard error; decoded text goes to standard output.
+to standard error; decoded text goes to standard output. The detected baud
+rate is written to standard error only when `-v` is supplied.
 
 ### 2. Audio input and normalization
 
@@ -108,6 +110,7 @@ Run with an audio path supported by FFmpeg:
 
 ```sh
 ./decode recording.mp3
+./decode -v recording.mp3
 ```
 
 For the encoder, build with a C11 compiler and the math library:
