@@ -132,7 +132,11 @@ export SIP_PASSWORD='your-sip-password'
 `--registrar`, `--identity`, `--username`, and `--command` are required. The
 password may instead be supplied with `--password`. The local SIP UDP port
 defaults to 0 (automatically picking an available ephemeral port); use
-`--port N` to bind a specific port. The baud rate defaults to 300 and accepts
+`--port N` to bind a specific port. By default PJSIP binds on all local
+interfaces; use `--bind eth0` to select an interface or `--bind 192.0.2.10`
+to select one of its IPv4 addresses. For an interface name, `sip` uses its
+first listed IPv4 address. The selected address is used for both SIP signaling
+and RTP audio. The baud rate defaults to 300 and accepts
 300, 600, or 1200. Additional encoder parameters can be configured with
 `--margin` (`-m`), `--speak` (`-s`), `--lang` (`-l`), `--gap` (`-g`),
 repeatable `--encoder-arg`, or trailing arguments after `--`. To preserve FSK

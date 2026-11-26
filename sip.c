@@ -2,7 +2,9 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <errno.h>
+#include <arpa/inet.h>
 #include <fcntl.h>
+#include <ifaddrs.h>
 #include <math.h>
 #include <pjmedia/wav_port.h>
 #include <pjsua-lib/pjsua.h>
@@ -14,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -43,6 +46,7 @@ typedef struct {
     const char *extra_encoder_args[MAX_ENCODER_ARGS];
     size_t extra_encoder_arg_count;
     unsigned local_port;
+    const char *bind_target;
 } AppConfig;
 
 typedef struct {
@@ -704,6 +708,48 @@ static int parse_unsigned(const char *text, unsigned minimum, unsigned maximum,
     return 0;
 }
 
+static int resolve_bind_address(const char *target, char *address,
+                                size_t address_size)
+{
+    struct in_addr parsed_address;
+    if (inet_pton(AF_INET, target, &parsed_address) == 1) {
+        if (strlen(target) >= address_size)
+            return -1;
+        strcpy(address, target);
+        return 0;
+    }
+
+    struct ifaddrs *interfaces;
+    if (getifaddrs(&interfaces) != 0) {
+        perror("getifaddrs");
+        return -1;
+    }
+
+    int found = 0;
+    for (const struct ifaddrs *interface = interfaces; interface != NULL;
+         interface = interface->ifa_next) {
+        if (interface->ifa_addr == NULL ||
+            interface->ifa_addr->sa_family != AF_INET ||
+            strcmp(interface->ifa_name, target) != 0)
+            continue;
+        const struct sockaddr_in *socket_address =
+            (const struct sockaddr_in *)interface->ifa_addr;
+        if (inet_ntop(AF_INET, &socket_address->sin_addr, address,
+                      (socklen_t)address_size) != NULL)
+            found = 1;
+        break;
+    }
+    freeifaddrs(interfaces);
+
+    if (!found) {
+        fprintf(stderr,
+                "Could not find an IPv4 address for bind target '%s'; use an IPv4 address or interface name.\n",
+                target);
+        return -1;
+    }
+    return 0;
+}
+
 static int parse_gap_text(const char *text)
 {
     char *end = NULL;
@@ -746,6 +792,7 @@ static void print_usage(const char *program)
     fprintf(stderr, "  --encoder-arg arg     Extra argument forwarded to encoder (repeatable).\n");
     fprintf(stderr, "  --                    Forward all remaining arguments to encoder.\n");
     fprintf(stderr, "  --port number         Local UDP port, 0 to 65535 (default: 0, auto).\n");
+    fprintf(stderr, "  --bind target         Local IPv4 address or interface name to bind.\n");
     fprintf(stderr, "  -h, --help            Show this help.\n");
     fprintf(stderr, "The client answers one call at a time and hangs up after playback.\n");
 }
@@ -825,6 +872,12 @@ static int parse_arguments(int argc, char **argv, AppConfig *config)
                 fprintf(stderr, "Local SIP port must be from 0 to 65535.\n");
                 return -1;
             }
+        } else if (strcmp(option, "--bind") == 0) {
+            if (value[0] == '\0' || value[0] == '-') {
+                fprintf(stderr, "Bind target must be an IPv4 address or interface name.\n");
+                return -1;
+            }
+            config->bind_target = value;
         } else {
             print_usage(argv[0]);
             return -1;
@@ -941,6 +994,15 @@ int main(int argc, char **argv)
     pjsua_transport_config transport_config;
     pjsua_transport_config_default(&transport_config);
     transport_config.port = config.local_port;
+    char bind_address[INET_ADDRSTRLEN];
+    if (config.bind_target != NULL) {
+        if (resolve_bind_address(config.bind_target, bind_address,
+                                 sizeof(bind_address)) != 0) {
+            status = PJ_EINVAL;
+            goto shutdown;
+        }
+        transport_config.bound_addr = pj_str(bind_address);
+    }
     status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &transport_config, NULL);
     if (status != PJ_SUCCESS) {
         print_pj_error("Could not create UDP SIP transport", status);
@@ -962,6 +1024,8 @@ int main(int argc, char **argv)
     pjsua_acc_config_default(&account_config);
     account_config.id = pj_str((char *)config.identity);
     account_config.reg_uri = pj_str((char *)config.registrar);
+    if (config.bind_target != NULL)
+        account_config.rtp_cfg.bound_addr = pj_str(bind_address);
     if (config.password != NULL) {
         account_config.cred_count = 1;
         account_config.cred_info[0].realm = pj_str("*");
