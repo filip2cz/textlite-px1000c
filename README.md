@@ -5,8 +5,15 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `README.md` - this document
 `LICENSE` - MIT License
+`AGENTS.md` - project conventions and detailed decoder architecture
 `decode.c` - C command-line decoder for PX1000 C audio transmissions
 `test_abc123.mp3` - test recording; its transmitted text includes `test abc123`
+
+## Architecture and maintenance
+
+The decoder pipeline and coding conventions are documented in [AGENTS.md](AGENTS.md).
+Keep `AGENTS.md` and this README updated together with every code, configuration,
+or documentation change.
 
 ## Decode a recording
 
