@@ -25,6 +25,8 @@ defined in `.github/workflows/main.yml` and uses `.github/scripts/build_pjsip.sh
 to build minimal static PJSIP libraries per target architecture so `decode`,
 `encode`, and `sip` are all cross-compiled across `x86_64`, `x86`, `aarch64`,
 `armv7l`, `armv5te`, and `riscv64` after the Nix test suite passes.
+`pterodactyl/egg-sip.json` defines a Pterodactyl egg that builds `sip` and
+`encode` against those static PJSIP libraries and runs the SIP responder.
 
 ### 1. Command-line entry point
 
@@ -160,7 +162,10 @@ low-bitrate speech vocoders so FSK tones are preserved.
 The SIP program requires a registrar URI, account identity URI, authentication
 username, and command. A password may be supplied through `SIP_PASSWORD` or
 `--password`. The encoder path defaults to `./encode`, the baud rate to 300,
-and the local UDP SIP port to 0 (ephemeral port). `--bind` can select a local
+and the local UDP SIP port to 0 (ephemeral port). The RTP audio port also
+defaults to 0; `--rtp-port` can select a fixed even UDP port, with RTCP on the
+next port. `--public-address` can set the public IPv4 address advertised in SIP
+and RTP SDP when the process is behind NAT. `--bind` can select a local
 IPv4 address or a network interface name; an interface name resolves to its
 first listed IPv4 address. Without `--bind`, PJSIP binds on all local
 interfaces. The selected address applies to both SIP signaling and RTP audio.
@@ -168,6 +173,15 @@ Other supported baud rates are 600 and 1200. Encoder options `--margin`, `--spea
 `encode`'s `-m`, `-s`, `-l`, and `-g` flags; `--encoder-arg` (repeatable) and
 trailing arguments after `--` forward additional arguments to the encoder.
 Build using PJSIP's `libpjproject` pkg-config metadata.
+
+The Pterodactyl egg installs the source from its configured Git repository and
+branch, builds PJSIP 2.16 in an Alpine installer container, then statically
+links `sip` and `encode` with musl and places them and its startup wrapper in
+the server directory. At runtime, allocate the configured
+SIP UDP port and both the selected RTP UDP port and its following RTCP port.
+The default RTP port is 40000. The Pterodactyl install script bundles eSpeak NG
+into the server directory, so the optional speech setting is available with
+the egg's Alpine runtime image.
 
 ### 9. Nix development shell
 
@@ -178,6 +192,30 @@ FFmpeg is needed by the decoder at runtime; eSpeak NG is needed only when the
 encoder's speech option is used; PJSIP is needed by `sip`. Enter the shell from
 the project directory with `nix-shell`. Keep this dependency list consistent
 with the runtime requirements in this file and `README.md`.
+
+### 10. Pterodactyl egg
+
+`pterodactyl/egg-sip.json` is an importable Pterodactyl egg. Its install script
+clones a configurable repository and branch, installs the build tools with
+Alpine's package manager, builds PJSIP 2.16 as static libraries with
+`.github/scripts/build_pjsip.sh`, and statically links `sip` and `encode` with
+musl before copying them to the server directory. The installer puts eSpeak NG,
+its libraries, and voice data in a private server-directory root. It also
+installs a small launcher that uses the bundled musl loader, so speech works
+even when the runtime image does not include eSpeak NG or musl. The egg embeds
+the startup wrapper in its install script; `pterodactyl/start.sh` is its source
+template.
+The PTDL_v2 export includes an email-formatted author and text field types for
+egg variables.
+Its `config.startup` value is a JSON-encoded string, as required by the Panel
+importer. The startup wrapper passes egg variables as separate arguments,
+reads the SIP password through `SIP_PASSWORD`, binds SIP to Pterodactyl's
+assigned `SERVER_PORT`, and sets the configured fixed RTP port. It advertises
+`SIP_PUBLIC_ADDRESS` when set, otherwise it uses Pterodactyl's `SERVER_IP` for
+SIP and RTP. Allocate that SIP UDP port and the RTP port plus one for RTCP. Set
+`SIP_PUBLIC_ADDRESS` to an externally reachable IPv4 address when `SERVER_IP`
+is behind another NAT. Optional speech is available with eSpeak NG bundled by
+the installer.
 
 ## Build and run
 

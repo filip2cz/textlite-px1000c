@@ -19,6 +19,10 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `shell.nix` - Nix development shell with the compiler and audio tools
 
+`pterodactyl/egg-sip.json` - importable Pterodactyl egg for the SIP responder
+
+`pterodactyl/start.sh` - source template for the egg's argument-safe startup wrapper
+
 `.github/workflows/main.yml` - GitHub Actions CI workflow for testing, multi-architecture cross-compilation (`decode`, `encode`, and static `sip`), QEMU smoke tests, and draft releases
 
 `.github/scripts/build_pjsip.sh` - CI helper script that builds minimal static PJSIP libraries for each target architecture
@@ -135,7 +139,10 @@ export SIP_PASSWORD='your-sip-password'
 `--registrar`, `--identity`, `--username`, and `--command` are required. The
 password may instead be supplied with `--password`. The local SIP UDP port
 defaults to 0 (automatically picking an available ephemeral port); use
-`--port N` to bind a specific port. By default PJSIP binds on all local
+`--port N` to bind a specific port. RTP audio also uses an ephemeral port by
+default; use `--rtp-port N` to select a fixed RTP port, with RTCP on the
+following port. Use `--public-address IPv4` when the host is behind NAT so SIP
+and RTP SDP advertise its public address. By default PJSIP binds on all local
 interfaces; use `--bind eth0` to select an interface or `--bind 192.0.2.10`
 to select one of its IPv4 addresses. For an interface name, `sip` uses its
 first listed IPv4 address. The selected address is used for both SIP signaling
@@ -147,6 +154,37 @@ modem tones, `sip` disables VAD and echo cancellation and prefers waveform
 codecs (`PCMA`, `PCMU`, `G.722`) over speech vocoders. Stop the client with
 Ctrl+C.
 
+### Deploy with Pterodactyl
+
+Import [pterodactyl/egg-sip.json](pterodactyl/egg-sip.json) from Admin → Eggs →
+Import Egg. The egg clones its configured Git repository and branch during
+installation, builds PJSIP 2.16 statically, and copies `sip` and `encode` into
+the server directory. It uses an Alpine installer and defaults to the official
+Alpine Pterodactyl runtime image. The programs are statically linked with
+musl, so the runtime image does not need PJSIP or compiler libraries. The
+installer also bundles eSpeak NG, its libraries, and voice data in the server
+directory, then installs a launcher that uses the bundled musl loader. Speech
+therefore works without eSpeak NG or musl in the runtime image. The PTDL_v2 egg
+metadata includes an email-formatted
+author and text field types for all variables, as expected by current Panel egg
+exports. Its startup-detection configuration is JSON encoded inside a string,
+as required by the Panel importer.
+
+Assign a UDP allocation for SIP and set that as the server's primary allocation.
+The egg binds SIP to that port. Also allocate the RTP UDP port and the following
+RTCP port; the default RTP port is 40000, so those allocations are 40000 and
+40001. Set the egg's RTP Port value to the first of those ports. These UDP
+allocations must be reachable from the SIP provider for call audio to work.
+The startup wrapper advertises Pterodactyl's `SERVER_IP` in SIP and RTP SDP by
+default. If that address is behind another NAT, set Public IPv4 Address to the
+IPv4 address reachable by the SIP provider.
+
+Set the registrar, account identity, authentication username, password, and
+text command in the server's Startup settings. The command's standard output
+becomes the transmitted message. The password is passed through `SIP_PASSWORD`
+instead of the startup command. Enable Speak Message to speak the text before
+the encoded transmission; eSpeak NG is installed by the egg's install script.
+
 ## Development note
 
 This project was vibecoded with OpenAI Codex using the GPT-6 Luna model.
@@ -157,4 +195,6 @@ and the [PX 1000 C operating instructions](https://www.manualslib.com/manual/345
 
 At runtime, `decode` requires FFmpeg. `encode` writes WAV directly and does not
 require FFmpeg or Python. eSpeak NG is an optional runtime dependency when
-`encode --speak` is used. `sip` requires PJSIP and the `encode` executable.
+`encode --speak` is used. `sip` requires PJSIP when it is built and the
+`encode` executable at runtime. The Pterodactyl egg statically links PJSIP into
+`sip`.

@@ -1,0 +1,182 @@
+{
+  "_comment": "TextLite PX1000 C SIP responder. Import this file into Pterodactyl as an egg.",
+  "meta": {
+    "version": "PTDL_v2",
+    "update_url": null
+  },
+  "exported_at": "2026-11-26T00:00:00+00:00",
+  "name": "TextLite PX1000 C SIP",
+  "author": "filip2cz@users.noreply.github.com",
+  "description": "Answers SIP calls with command-generated PX1000 C audio using sip.c and encode.c.",
+  "features": null,
+  "docker_images": {
+    "Alpine": "ghcr.io/pterodactyl/yolks:alpine"
+  },
+  "file_denylist": [],
+  "startup": "sh ./start.sh",
+  "config": {
+    "files": "{}",
+    "startup": "{\"done\":\"SIP client started; waiting for incoming calls.\"}",
+    "logs": "{}",
+    "stop": "^C"
+  },
+  "scripts": {
+    "installation": {
+      "script": "#!/bin/ash\nset -eu\n\napk add --no-cache bash build-base ca-certificates coreutils curl git linux-headers pkgconf python3\n\nESPEAK_ROOT=/mnt/server/espeak-runtime\nmkdir -p \"$ESPEAK_ROOT/etc/apk\"\ncp -R /etc/apk/keys \"$ESPEAK_ROOT/etc/apk/\"\ncp /etc/apk/repositories \"$ESPEAK_ROOT/etc/apk/repositories\"\napk --root \"$ESPEAK_ROOT\" --initdb --no-scripts add --no-cache espeak-ng musl\nif [ ! -x \"$ESPEAK_ROOT/usr/bin/espeak-ng\" ] ||\n   [ ! -d \"$ESPEAK_ROOT/usr/share/espeak-ng-data\" ] ||\n   ! ls \"$ESPEAK_ROOT\"/lib/ld-musl-*.so.1 >/dev/null 2>&1; then\n    echo \"Could not prepare the bundled eSpeak NG runtime.\" >&2\n    exit 1\nfi\necho \"Bundled eSpeak NG runtime installed.\"\n\nWORKDIR=\"$(mktemp -d)\"\ntrap 'rm -rf \"$WORKDIR\"' EXIT\nSOURCE_DIR=\"$WORKDIR/source\"\nPJSIP_PREFIX=\"$WORKDIR/pjsip\"\nPJSIP_VERSION=2.16\n\ngit clone --depth 1 --branch \"$SOURCE_BRANCH\" \"$SOURCE_REPOSITORY\" \"$SOURCE_DIR\"\ncurl -fL --retry 3 \\\n    \"https://github.com/pjsip/pjproject/archive/refs/tags/${PJSIP_VERSION}.tar.gz\" \\\n    -o \"$WORKDIR/pjproject.tar.gz\"\nbash \"$SOURCE_DIR/.github/scripts/build_pjsip.sh\" \\\n    --tarball \"$WORKDIR/pjproject.tar.gz\" \\\n    --prefix \"$PJSIP_PREFIX\" \\\n    --cc gcc \\\n    --cxx g++ \\\n    --cflags \"-O2\"\n\nexport PKG_CONFIG_PATH=\"$PJSIP_PREFIX/lib/pkgconfig\"\nexport PJSIP_CFLAGS=\"$(pkg-config --static --cflags libpjproject)\"\nexport PJSIP_LIBS=\"$(pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')\"\nmake -C \"$SOURCE_DIR\" CC='gcc -static' sip encode\ninstall -m 0755 \"$SOURCE_DIR/sip\" /mnt/server/sip\ninstall -m 0755 \"$SOURCE_DIR/encode\" /mnt/server/encode\n\ncat > /mnt/server/start.sh <<'START_SCRIPT'\n#!/bin/sh\nset -eu\n\npublic_address=\"${SIP_PUBLIC_ADDRESS:-${SERVER_IP:-}}\"\nespeak_runtime=\"$HOME/espeak-runtime\"\nif [ -x \"$espeak_runtime/usr/bin/espeak-ng\" ]; then\n    PATH=\"$HOME/espeak-bin:$PATH\"\n    ESPEAK_DATA_PATH=\"$espeak_runtime/usr/share/espeak-ng-data\"\n    export PATH ESPEAK_DATA_PATH\nfi\n\nset -- \\\n    --registrar \"$SIP_REGISTRAR\" \\\n    --identity \"$SIP_IDENTITY\" \\\n    --username \"$SIP_USERNAME\" \\\n    --command \"$SIP_COMMAND\" \\\n    --port \"$SERVER_PORT\" \\\n    --rtp-port \"$SIP_RTP_PORT\" \\\n    --bind \"$SIP_BIND_ADDRESS\" \\\n    --baud \"$SIP_BAUD\"\n\nif [ -n \"$public_address\" ] && [ \"$public_address\" != \"127.0.0.1\" ]; then\n    set -- \"$@\" --public-address \"$public_address\"\nfi\nif [ -n \"${SIP_MARGIN:-}\" ]; then\n    set -- \"$@\" --margin \"$SIP_MARGIN\"\nfi\nif [ \"${SIP_SPEAK:-0}\" = \"1\" ]; then\n    set -- \"$@\" --speak\nfi\nif [ -n \"${SIP_LANG:-}\" ]; then\n    set -- \"$@\" --lang \"$SIP_LANG\"\nfi\nif [ -n \"${SIP_GAP:-}\" ]; then\n    set -- \"$@\" --gap \"$SIP_GAP\"\nfi\n\nexec ./sip \"$@\"\nSTART_SCRIPT\nchmod 0755 /mnt/server/start.sh\n\nmkdir -p /mnt/server/espeak-bin\ncat > /mnt/server/espeak-bin/espeak-ng <<'ESPEAK_WRAPPER'\n#!/bin/sh\nset -eu\n\nruntime=\"$HOME/espeak-runtime\"\nfor loader in \"$runtime\"/lib/ld-musl-*.so.1; do\n    if [ -x \"$loader\" ]; then\n        export ESPEAK_DATA_PATH=\"$runtime/usr/share/espeak-ng-data\"\n        exec \"$loader\" --library-path \"$runtime/usr/lib\" \\\n            \"$runtime/usr/bin/espeak-ng\" \"$@\"\n    fi\ndone\n\nprintf '%s\\n' 'Bundled eSpeak NG musl loader was not found.' >&2\nexit 127\nESPEAK_WRAPPER\nchmod 0755 /mnt/server/espeak-bin/espeak-ng\n",
+      "container": "ghcr.io/pterodactyl/installers:alpine",
+      "entrypoint": "ash"
+    }
+  },
+  "variables": [
+    {
+      "name": "SIP Registrar URI",
+      "description": "SIP registrar URI, for example sip:pbx.example.net.",
+      "env_variable": "SIP_REGISTRAR",
+      "default_value": "sip:pbx.example.net",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:255",
+      "field_type": "text"
+    },
+    {
+      "name": "SIP Account Identity",
+      "description": "SIP identity URI, for example sip:1001@pbx.example.net.",
+      "env_variable": "SIP_IDENTITY",
+      "default_value": "sip:1001@pbx.example.net",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:255",
+      "field_type": "text"
+    },
+    {
+      "name": "SIP Authentication Username",
+      "description": "Digest-auth username for the SIP account.",
+      "env_variable": "SIP_USERNAME",
+      "default_value": "1001",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:255",
+      "field_type": "text"
+    },
+    {
+      "name": "SIP Password",
+      "description": "Optional SIP digest-auth password. Passed to sip through the SIP_PASSWORD environment variable.",
+      "env_variable": "SIP_PASSWORD",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string|max:255",
+      "field_type": "text"
+    },
+    {
+      "name": "Text Command",
+      "description": "Shell command whose standard output becomes the encoded message.",
+      "env_variable": "SIP_COMMAND",
+      "default_value": "printf '%s\\n' 'PX1000 C is ready'",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:4096",
+      "field_type": "text"
+    },
+    {
+      "name": "Baud Rate",
+      "description": "PX modem rate used by the encoder.",
+      "env_variable": "SIP_BAUD",
+      "default_value": "300",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|integer|in:300,600,1200",
+      "field_type": "text"
+    },
+    {
+      "name": "RTP Port",
+      "description": "Even UDP port used for RTP audio; RTCP uses the next port. Allocate both ports in Pterodactyl.",
+      "env_variable": "SIP_RTP_PORT",
+      "default_value": "40000",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|integer|between:0,65534|regex:/^[0-9]*[02468]$/",
+      "field_type": "text"
+    },
+    {
+      "name": "Local Bind Address",
+      "description": "Local IPv4 address or interface name inside the container; normally leave at 0.0.0.0.",
+      "env_variable": "SIP_BIND_ADDRESS",
+      "default_value": "0.0.0.0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:64",
+      "field_type": "text"
+    },
+    {
+      "name": "Public IPv4 Address",
+      "description": "Public IPv4 address advertised in SIP and RTP SDP when the server is behind NAT; leave blank when not needed.",
+      "env_variable": "SIP_PUBLIC_ADDRESS",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|ipv4",
+      "field_type": "text"
+    },
+    {
+      "name": "Encoder Margin",
+      "description": "Optional PX margin byte from 0 to 127; blank uses the encoder default.",
+      "env_variable": "SIP_MARGIN",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|integer|between:0,127",
+      "field_type": "text"
+    },
+    {
+      "name": "Speak Message",
+      "description": "Speak the text before the modem transmission. eSpeak NG is bundled by the egg installer.",
+      "env_variable": "SIP_SPEAK",
+      "default_value": "0",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "boolean",
+      "field_type": "text"
+    },
+    {
+      "name": "Speech Language",
+      "description": "Optional eSpeak NG voice or language code, for example cs or en-us.",
+      "env_variable": "SIP_LANG",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|string|max:32",
+      "field_type": "text"
+    },
+    {
+      "name": "Speech Gap",
+      "description": "Optional silence after speech, in seconds from 0 to 600.",
+      "env_variable": "SIP_GAP",
+      "default_value": "",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "nullable|numeric|between:0,600",
+      "field_type": "text"
+    },
+    {
+      "name": "Source Repository",
+      "description": "Git repository containing textlite-px1000c source code; used during install/reinstall.",
+      "env_variable": "SOURCE_REPOSITORY",
+      "default_value": "https://github.com/filip2cz/textlite-px1000c.git",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:512",
+      "field_type": "text"
+    },
+    {
+      "name": "Source Branch",
+      "description": "Git branch to build during install/reinstall.",
+      "env_variable": "SOURCE_BRANCH",
+      "default_value": "main",
+      "user_viewable": true,
+      "user_editable": true,
+      "rules": "required|string|max:128",
+      "field_type": "text"
+    }
+  ]
+}

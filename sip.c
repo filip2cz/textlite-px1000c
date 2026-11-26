@@ -50,7 +50,9 @@ typedef struct {
     const char *extra_encoder_args[MAX_ENCODER_ARGS];
     size_t extra_encoder_arg_count;
     unsigned local_port;
+    unsigned rtp_port;
     const char *bind_target;
+    const char *public_address;
 } AppConfig;
 
 typedef struct {
@@ -813,7 +815,9 @@ static void print_usage(const char *program)
     fprintf(stderr, "  --encoder-arg arg     Extra argument forwarded to encoder (repeatable).\n");
     fprintf(stderr, "  --                    Forward all remaining arguments to encoder.\n");
     fprintf(stderr, "  --port number         Local UDP port, 0 to 65535 (default: 0, auto).\n");
+    fprintf(stderr, "  --rtp-port number     Even local RTP port, 0 or 2 to 65534 (default: 0, auto).\n");
     fprintf(stderr, "  --bind target         Local IPv4 address or interface name to bind.\n");
+    fprintf(stderr, "  --public-address IPv4 Public IPv4 address advertised in SIP and SDP.\n");
     fprintf(stderr, "  -h, --help            Show this help.\n");
     fprintf(stderr, "The client answers one call at a time and hangs up after playback.\n");
 }
@@ -893,12 +897,25 @@ static int parse_arguments(int argc, char **argv, AppConfig *config)
                 fprintf(stderr, "Local SIP port must be from 0 to 65535.\n");
                 return -1;
             }
+        } else if (strcmp(option, "--rtp-port") == 0) {
+            if (parse_unsigned(value, 0, 65534, &config->rtp_port) != 0 ||
+                (config->rtp_port != 0 && (config->rtp_port & 1U) != 0)) {
+                fprintf(stderr, "Local RTP port must be 0 or an even port from 2 to 65534.\n");
+                return -1;
+            }
         } else if (strcmp(option, "--bind") == 0) {
             if (value[0] == '\0' || value[0] == '-') {
                 fprintf(stderr, "Bind target must be an IPv4 address or interface name.\n");
                 return -1;
             }
             config->bind_target = value;
+        } else if (strcmp(option, "--public-address") == 0) {
+            struct in_addr address;
+            if (inet_pton(AF_INET, value, &address) != 1) {
+                fprintf(stderr, "Public address must be an IPv4 address.\n");
+                return -1;
+            }
+            config->public_address = value;
         } else {
             print_usage(argv[0]);
             return -1;
@@ -1019,6 +1036,8 @@ int main(int argc, char **argv)
     pjsua_transport_config transport_config;
     pjsua_transport_config_default(&transport_config);
     transport_config.port = config.local_port;
+    if (config.public_address != NULL)
+        transport_config.public_addr = pj_str((char *)config.public_address);
     char bind_address[INET_ADDRSTRLEN];
     if (config.bind_target != NULL) {
         if (resolve_bind_address(config.bind_target, bind_address,
@@ -1049,6 +1068,12 @@ int main(int argc, char **argv)
     pjsua_acc_config_default(&account_config);
     account_config.id = pj_str((char *)config.identity);
     account_config.reg_uri = pj_str((char *)config.registrar);
+    if (config.rtp_port != 0) {
+        account_config.rtp_cfg.port = config.rtp_port;
+        account_config.rtp_cfg.port_range = 1;
+    }
+    if (config.public_address != NULL)
+        account_config.rtp_cfg.public_addr = pj_str((char *)config.public_address);
     if (config.bind_target != NULL)
         account_config.rtp_cfg.bound_addr = pj_str(bind_address);
     if (config.password != NULL) {
