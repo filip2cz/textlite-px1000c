@@ -7,6 +7,8 @@
 - For every code, configuration, or documentation change, update both
   `AGENTS.md` and `README.md` in the same change. Keep this architecture
   description and the README's user instructions in sync with the code.
+- Keep the development-tool and AI-model attribution in the README accurate;
+  update both documents together if that attribution changes.
 - Do not describe support for a modem profile unless the implementation
   actually supports it.
 

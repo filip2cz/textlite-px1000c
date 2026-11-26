@@ -5,10 +5,10 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `README.md` - this document
 `LICENSE` - MIT License
-`AGENTS.md` - project conventions and detailed encoder/decoder architecture
 `decode.c` - C command-line decoder for PX1000 C audio transmissions
 `encode.c` - C command-line encoder from text to PX1000 C audio
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
+`AGENTS.md` - project conventions and detailed encoder/decoder architecture, designed for AI
 
 ## Architecture and maintenance
 
@@ -60,3 +60,14 @@ cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 If the text argument is omitted, the encoder reads text from redirected standard
 input. When run interactively without text, or with empty input, it prints the
 encoder's usage, options, and defaults to standard error.
+
+## Development note
+
+This project was vibecoded with OpenAI Codex using the GPT-6 Luna model.
+Development tools included a C compiler (`cc`), FFmpeg for audio conversion and
+inspection, and Python 3 for signal analysis. Protocol details were checked
+against the [PX-1000 technical manual](https://www.cryptomuseum.com/crypto/philips/px1000/files/px1000_service_manual.pdf)
+and the [PX 1000 C operating instructions](https://www.manualslib.com/manual/3453877/Text-Lite-Px-1000-C.html).
+
+At runtime, `decode` requires FFmpeg. `encode` writes WAV directly and does not
+require FFmpeg or Python.
