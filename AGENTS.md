@@ -12,9 +12,9 @@
 
 ## Project architecture
 
-The project is a small POSIX C command-line decoder. `decode.c` contains the
-complete processing pipeline; it does not use a separate application
-framework or audio library.
+The project contains two small POSIX C command-line tools. `decode.c` and
+`encode.c` implement the receive and send paths; there is no separate
+application framework or audio library.
 
 ### 1. Command-line entry point
 
@@ -67,7 +67,23 @@ timing search and frame parser, then updating this file and `README.md`.
 returns and line feeds to output newlines, and omits trailing control-byte
 padding. Printable ASCII text is written to standard output.
 
-### 6. Memory and process cleanup
+### 6. Text-to-audio encoding
+
+`encode.c` accepts text as command-line arguments or from standard input. It
+validates 7-bit printable ASCII (plus tabs and line breaks), normalizes line
+endings to carriage returns, and appends the PX text terminator. The default
+margin byte is 40; `-m` can choose another value from 0 to 127.
+
+The encoder writes a RIFF WAV file containing mono, signed 16-bit PCM at
+44,100 Hz. Its `AudioWriter` emits continuous-phase FSK samples, using 147
+samples per bit at 300 baud. It writes the PX synchronization header, then
+7E2-framed bytes for the margin and text, followed by 32 ASCII 0x04 end-of-text
+bytes and a one-second MARK tone. This is the normal, unencrypted text path.
+
+The encoder defaults to `encoded.wav`; `-o` selects another output path. It
+does not depend on FFmpeg because it writes PCM WAV directly.
+
+### 7. Memory and process cleanup
 
 Each stage reports failure to its caller. `main` frees PCM samples, demodulated
 symbols, and candidate bytes as the pipeline completes. The FFmpeg child is
@@ -85,4 +101,17 @@ Run with an audio path supported by FFmpeg:
 
 ```sh
 ./decode recording.mp3
+```
+
+For the encoder, build with a C11 compiler and the math library:
+
+```sh
+cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
+```
+
+Pass text directly, or omit it to read from standard input:
+
+```sh
+./encode -o message.wav "test abc123"
+printf '%s' "test abc123" | ./encode -o message.wav
 ```
