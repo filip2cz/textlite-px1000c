@@ -42,15 +42,17 @@ FFmpeg must be installed and available as `ffmpeg` on `PATH`. Then run:
 ## Encode text
 
 `encode.c` writes a mono, 16-bit PCM WAV file at 44.1 kHz. It accepts printable
-7-bit ASCII text and generates a 300-baud PX audio transmission. The default
-margin byte is 40; use `-m` to select a value from 0 to 127. The default output
-is `encoded.wav`, or use `-o` to choose another path.
+7-bit ASCII text and generates a 300, 600, or 1200-baud PX audio transmission.
+Use `-b` to select the baud rate; the default is 300. The default margin byte
+is 40; use `-m` to select a value from 0 to 127. The default output is
+`encoded.wav`, or use `-o` to choose another path.
 
 Build and encode a message:
 
 ```sh
 cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 ./encode -o message.wav "test abc123"
+./encode -b 1200 -o message.wav "test abc123"
 ```
 
 If the text argument is omitted, the encoder reads text from standard input.

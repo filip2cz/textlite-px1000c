@@ -9,8 +9,6 @@
 
 enum {
     SAMPLE_RATE = 44100,
-    BAUD_RATE = 300,
-    SAMPLES_PER_BIT = SAMPLE_RATE / BAUD_RATE,
     MAX_TEXT_BYTES = 7400,
     PCM_AMPLITUDE = 14000,
     PCM_BUFFER_SIZE = 8192
@@ -22,6 +20,8 @@ typedef struct {
     size_t used;
     uint64_t data_bytes;
     double phase;
+    unsigned baud_rate;
+    unsigned sample_remainder;
 } AudioWriter;
 
 static int flush_pcm(AudioWriter *writer)
@@ -51,7 +51,12 @@ static int write_tone_bit(AudioWriter *writer, unsigned bit)
     const double tau = 6.2831853071795864769;
     double frequency = bit ? 1300.0 : 1700.0;
     double increment = tau * frequency / SAMPLE_RATE;
-    for (int i = 0; i < SAMPLES_PER_BIT; ++i) {
+    /* Distribute fractional samples across bits to keep the average baud rate
+       exact when the sample rate is not divisible by the selected speed. */
+    writer->sample_remainder += SAMPLE_RATE;
+    unsigned sample_count = writer->sample_remainder / writer->baud_rate;
+    writer->sample_remainder %= writer->baud_rate;
+    for (unsigned i = 0; i < sample_count; ++i) {
         int16_t sample = (int16_t)lrint(sin(writer->phase) * PCM_AMPLITUDE);
         if (write_sample(writer, sample) != 0)
             return -1;
@@ -236,8 +241,20 @@ static int parse_margin(const char *text, unsigned *margin_out)
     return 0;
 }
 
+static int parse_baud_rate(const char *text, unsigned *baud_rate_out)
+{
+    char *end = NULL;
+    errno = 0;
+    long value = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        (value != 300 && value != 600 && value != 1200))
+        return -1;
+    *baud_rate_out = (unsigned)value;
+    return 0;
+}
+
 static int encode(const char *output_path, const unsigned char *text,
-                  size_t text_length, unsigned margin)
+                  size_t text_length, unsigned margin, unsigned baud_rate)
 {
     FILE *file = fopen(output_path, "wb+");
     if (file == NULL) {
@@ -253,6 +270,7 @@ static int encode(const char *output_path, const unsigned char *text,
 
     AudioWriter writer = {0};
     writer.file = file;
+    writer.baud_rate = baud_rate;
 
     /* PX header: 0.5 s MARK, sixteen NUL frames, 0.8 s MARK, four NUL frames. */
     int failed = write_mark_duration(&writer, 500) != 0;
@@ -297,7 +315,8 @@ static int encode(const char *output_path, const unsigned char *text,
 
 static void print_usage(const char *program)
 {
-    fprintf(stderr, "Usage: %s [-o output.wav] [-m margin] [text]\n", program);
+    fprintf(stderr, "Usage: %s [-o output.wav] [-m margin] [-b baud] [text]\n", program);
+    fprintf(stderr, "Baud rate must be 300, 600, or 1200 (default: 300).\n");
     fprintf(stderr, "If text is omitted, it is read from standard input.\n");
 }
 
@@ -305,6 +324,7 @@ int main(int argc, char **argv)
 {
     const char *output_path = "encoded.wav";
     unsigned margin = 40;
+    unsigned baud_rate = 300;
     int index = 1;
     while (index < argc && argv[index][0] == '-') {
         if (strcmp(argv[index], "--") == 0) {
@@ -316,6 +336,12 @@ int main(int argc, char **argv)
         } else if (strcmp(argv[index], "-m") == 0 && index + 1 < argc) {
             if (parse_margin(argv[index + 1], &margin) != 0) {
                 fprintf(stderr, "Margin must be an integer from 0 to 127.\n");
+                return 2;
+            }
+            index += 2;
+        } else if (strcmp(argv[index], "-b") == 0 && index + 1 < argc) {
+            if (parse_baud_rate(argv[index + 1], &baud_rate) != 0) {
+                fprintf(stderr, "Baud rate must be 300, 600, or 1200.\n");
                 return 2;
             }
             index += 2;
@@ -359,7 +385,7 @@ int main(int argc, char **argv)
     if (normalized != 0)
         return 1;
 
-    int result = encode(output_path, text, text_length, margin);
+    int result = encode(output_path, text, text_length, margin, baud_rate);
     free(text);
     if (result != 0)
         return 1;

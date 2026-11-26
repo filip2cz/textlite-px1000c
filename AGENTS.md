@@ -78,13 +78,17 @@ endings to carriage returns, and appends the PX text terminator. The default
 margin byte is 40; `-m` can choose another value from 0 to 127.
 
 The encoder writes a RIFF WAV file containing mono, signed 16-bit PCM at
-44,100 Hz. Its `AudioWriter` emits continuous-phase FSK samples, using 147
-samples per bit at 300 baud. It writes the PX synchronization header, then
-7E2-framed bytes for the margin and text, followed by 32 ASCII 0x04 end-of-text
-bytes and a one-second MARK tone. This is the normal, unencrypted text path.
+44,100 Hz. Its `AudioWriter` emits continuous-phase FSK samples at 300, 600,
+or 1200 baud. A sample-remainder accumulator distributes fractional samples
+across bits, preserving the selected average baud rate (600 and 1200 do not
+have an integer number of samples per bit). It writes the PX synchronization
+header, then 7E2-framed bytes for the margin and text, followed by 32 ASCII
+0x04 end-of-text bytes and a one-second MARK tone. This is the normal,
+unencrypted text path.
 
-The encoder defaults to `encoded.wav`; `-o` selects another output path. It
-does not depend on FFmpeg because it writes PCM WAV directly.
+The encoder defaults to 300 baud and `encoded.wav`; `-b` selects 300, 600, or
+1200 baud, while `-o` selects another output path. It does not depend on
+FFmpeg because it writes PCM WAV directly.
 
 ### 7. Memory and process cleanup
 
@@ -116,5 +120,6 @@ Pass text directly, or omit it to read from standard input:
 
 ```sh
 ./encode -o message.wav "test abc123"
+./encode -b 1200 -o message.wav "test abc123"
 printf '%s' "test abc123" | ./encode -o message.wav
 ```
