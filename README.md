@@ -23,8 +23,6 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `.github/scripts/build_pjsip.sh` - CI helper script that builds minimal static PJSIP libraries for each target architecture
 
-`egg-textlite-px1000c.json` - Pterodactyl Panel (`PTDL_v2`) egg for hosting the SIP responder
-
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
 
 `AGENTS.md` - project conventions and detailed encoder/decoder architecture, designed for AI
@@ -143,20 +141,6 @@ repeatable `--encoder-arg`, or trailing arguments after `--`. To preserve FSK
 modem tones, `sip` disables VAD and echo cancellation and prefers waveform
 codecs (`PCMA`, `PCMU`, `G.722`) over speech vocoders. Stop the client with
 Ctrl+C.
-
-## Pterodactyl Panel egg
-
-Import [`egg-textlite-px1000c.json`](egg-textlite-px1000c.json) in the
-Pterodactyl Admin Panel under **Nests → Import Egg**.
-
-- Uses `ghcr.io/pterodactyl/yolks:debian` at runtime and binds `sip` to the
-  server's allocated UDP port (`{{SERVER_PORT}}`).
-- Downloads matching prebuilt `sip`, `encode`, and `decode` binaries from the
-  selected GitHub release (`VERSION=latest` by default), or automatically builds
-  them from source if `VERSION=main` or no published release exists yet.
-- Configure `SIP_REGISTRAR`, `SIP_IDENTITY`, `SIP_USERNAME`, `SIP_PASSWORD`,
-  `SIP_COMMAND`, `BAUD_RATE`, and `MARGIN` in the server's **Startup** tab.
-  Enabling `SPEAK` requires a custom container image with `espeak-ng` installed.
 
 ## Development note
 
