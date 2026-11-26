@@ -8,7 +8,7 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 `AGENTS.md` - project conventions and detailed encoder/decoder architecture
 `decode.c` - C command-line decoder for PX1000 C audio transmissions
 `encode.c` - C command-line encoder from text to PX1000 C audio
-`test_abc123.mp3` - test recording; its transmitted text includes `test abc123`
+`test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
 
 ## Architecture and maintenance
 
