@@ -12,8 +12,8 @@ permissions:
   contents: write
 
 jobs:
-  test:
-    name: Test with Nix
+  test-and-build-sip:
+    name: Test and build sip (x86_64 Nix)
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -28,9 +28,24 @@ jobs:
         run: |
           nix-shell --run "./tests/run_tests.sh"
 
+      - name: Compile sip binary in nix-shell
+        run: |
+          mkdir -p build
+          nix-shell --run '
+            cc -std=c11 -O2 -Wall -Wextra -Werror sip.c -o build/sip-linux-x64 $(pkg-config --static --cflags --libs libpjproject) -pthread
+            build/sip-linux-x64 -h
+          '
+
+      - name: Upload sip binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-sip-x86_64
+          path: build/sip-linux-x64
+          if-no-files-found: error
+
   build-x86:
     name: Build x86 binaries
-    needs: test
+    needs: test-and-build-sip
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -62,7 +77,7 @@ jobs:
 
   build-arm:
     name: Build AArch64 and ARMv7 binaries
-    needs: test
+    needs: test-and-build-sip
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -94,7 +109,7 @@ jobs:
 
   build-armv5:
     name: Build ARMv5 binary
-    needs: test
+    needs: test-and-build-sip
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -122,7 +137,7 @@ jobs:
 
   build-riscv64:
     name: Build RISC-V 64-bit binary
-    needs: test
+    needs: test-and-build-sip
     runs-on: ubuntu-24.04
     steps:
       - name: Check out source
@@ -210,7 +225,7 @@ jobs:
     name: Create draft release
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs:
-      - test
+      - test-and-build-sip
       - verify-binaries
     runs-on: ubuntu-24.04
     permissions:
