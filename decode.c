@@ -12,8 +12,6 @@
 
 enum {
     SAMPLE_RATE = 22050,
-    BAUD_RATE = 300,
-    WINDOW_SIZE = 60,
     FRAME_BITS = 11,
     MAX_INPUT_BYTES = 512 * 1024 * 1024
 };
@@ -28,6 +26,7 @@ typedef struct {
     unsigned char *bytes;
     size_t count;
     double score;
+    unsigned baud_rate;
 } Candidate;
 
 static int read_ffmpeg_pcm(const char *path, int16_t **samples_out,
@@ -150,26 +149,27 @@ static int read_ffmpeg_pcm(const char *path, int16_t **samples_out,
 }
 
 static Symbol *demodulate(const int16_t *samples, size_t count,
+                          size_t window_size,
                           size_t *symbol_count_out, double *max_rms_out)
 {
     /* Compare the signal energy at the two PX modem tones in short sliding
        windows. The stronger tone represents one serial bit. */
-    if (count <= WINDOW_SIZE)
+    if (count <= window_size)
         return NULL;
 
     const double tau = 6.2831853071795864769;
-    double cosine[2][WINDOW_SIZE];
-    double sine[2][WINDOW_SIZE];
+    double cosine[2][window_size];
+    double sine[2][window_size];
     const double frequencies[2] = {1300.0, 1700.0};
     for (int f = 0; f < 2; ++f) {
-        for (int i = 0; i < WINDOW_SIZE; ++i) {
+        for (size_t i = 0; i < window_size; ++i) {
             double phase = tau * frequencies[f] * (double)i / SAMPLE_RATE;
             cosine[f][i] = cos(phase);
             sine[f][i] = sin(phase);
         }
     }
 
-    size_t symbol_count = count - WINDOW_SIZE + 1;
+    size_t symbol_count = count - window_size + 1;
     Symbol *symbols = calloc(symbol_count, sizeof(*symbols));
     if (symbols == NULL) {
         perror("calloc");
@@ -181,7 +181,7 @@ static Symbol *demodulate(const int16_t *samples, size_t count,
         double real[2] = {0.0, 0.0};
         double imag[2] = {0.0, 0.0};
         double power = 0.0;
-        for (int i = 0; i < WINDOW_SIZE; ++i) {
+        for (size_t i = 0; i < window_size; ++i) {
             double v = samples[start + (size_t)i];
             power += v * v;
             for (int f = 0; f < 2; ++f) {
@@ -192,7 +192,7 @@ static Symbol *demodulate(const int16_t *samples, size_t count,
         double energy0 = real[0] * real[0] + imag[0] * imag[0];
         double energy1 = real[1] * real[1] + imag[1] * imag[1];
         double sum = energy0 + energy1;
-        double rms = sqrt(power / WINDOW_SIZE);
+        double rms = sqrt(power / window_size);
         symbols[start].bit = energy0 > energy1 ? 1 : 0;
         symbols[start].confidence = sum > 0.0
             ? (float)(fabs(energy0 - energy1) / sum) : 0.0f;
@@ -210,7 +210,8 @@ static int printable_byte(unsigned char c)
     return (c >= 32 && c <= 126) || c == '\r' || c == '\n' || c == '\t';
 }
 
-static void consider_run(Candidate *best, unsigned char *run, size_t count)
+static void consider_run(Candidate *best, unsigned char *run, size_t count,
+                         unsigned baud_rate)
 {
     /* Prefer long, parity-valid runs that contain readable text. */
     if (count < 12)
@@ -229,26 +230,35 @@ static void consider_run(Candidate *best, unsigned char *run, size_t count)
         best->bytes = copy;
         best->count = count;
         best->score = score;
+        best->baud_rate = baud_rate;
     }
 }
 
 static Candidate find_message(const Symbol *symbols, size_t symbol_count,
-                              double max_rms)
+                              size_t window_size, double max_rms,
+                              unsigned baud_rate)
 {
-    /* Search possible bit-clock phases and keep the longest sequence of
-       valid 7E2 serial frames. */
+    /* Search bit-clock phases for one supported baud rate and keep the
+       longest sequence of valid 7E2 serial frames. */
     Candidate best = {0};
+    if (symbol_count <= window_size)
+        return best;
+
     double rms_gate = fmax(200.0, max_rms * 0.06);
-    const double confidence_gate = 0.22;
+    double confidence_gate = baud_rate == 300 ? 0.22
+                           : baud_rate == 600 ? 0.10 : 0.035;
     unsigned char *run = malloc(symbol_count / FRAME_BITS + 2);
     if (run == NULL)
         return best;
 
-    /* Search nominal 300 baud plus a small clock-error range.  Half-sample
-       phase steps also tolerate MP3 encoder delay. */
-    for (double period = 73.0; period <= 74.0001; period += 0.05) {
+    /* Search each nominal bit period with a small clock-error range. */
+    double nominal_period = (double)SAMPLE_RATE / baud_rate;
+    double period_step = baud_rate == 1200 ? 0.01 : 0.05;
+    for (double period = nominal_period * 0.9925;
+         period <= nominal_period * 1.0075;
+         period += period_step) {
         for (double phase = 0.0; phase < period; phase += 0.5) {
-            size_t bit_count = (size_t)((symbol_count - WINDOW_SIZE) / period);
+            size_t bit_count = (size_t)((symbol_count - window_size) / period);
             for (size_t bit_offset = 0; bit_offset < FRAME_BITS; ++bit_offset) {
                 size_t run_count = 0;
                 for (size_t first = bit_offset;
@@ -258,8 +268,8 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
                     int active = 1;
                     for (size_t j = 0; j < FRAME_BITS; ++j) {
                         size_t center = (size_t)llround(phase + (first + j) * period);
-                        size_t window_start = center >= WINDOW_SIZE / 2
-                            ? center - WINDOW_SIZE / 2 : 0;
+                        size_t window_start = center >= window_size / 2
+                            ? center - window_size / 2 : 0;
                         if (window_start >= symbol_count) {
                             active = 0;
                             break;
@@ -280,11 +290,11 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
                     if (valid) {
                         run[run_count++] = value;
                     } else {
-                        consider_run(&best, run, run_count);
+                        consider_run(&best, run, run_count, baud_rate);
                         run_count = 0;
                     }
                 }
-                consider_run(&best, run, run_count);
+                consider_run(&best, run, run_count, baud_rate);
             }
         }
     }
@@ -341,22 +351,39 @@ int main(int argc, char **argv)
     if (read_ffmpeg_pcm(argv[1], &samples, &sample_count) != 0)
         return 1;
 
-    size_t symbol_count = 0;
-    double max_rms = 0.0;
-    Symbol *symbols = demodulate(samples, sample_count, &symbol_count, &max_rms);
-    free(samples);
-    if (symbols == NULL) {
-        fprintf(stderr, "Audio file is too short or could not be processed.\n");
-        return 1;
+    /* Try each selectable modem speed with a bit window sized for that rate. */
+    const unsigned baud_rates[] = {300, 600, 1200};
+    Candidate message = {0};
+    for (size_t i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]); ++i) {
+        unsigned baud_rate = baud_rates[i];
+        size_t window_size = (size_t)llround((double)SAMPLE_RATE / baud_rate * 0.82);
+        if (baud_rate == 300)
+            window_size = 60;
+        else if (baud_rate == 1200)
+            window_size = 19;
+        size_t symbol_count = 0;
+        double max_rms = 0.0;
+        Symbol *symbols = demodulate(samples, sample_count, window_size,
+                                     &symbol_count, &max_rms);
+        if (symbols == NULL)
+            continue;
+        Candidate candidate = find_message(symbols, symbol_count, window_size,
+                                           max_rms, baud_rate);
+        free(symbols);
+        if (candidate.score > message.score) {
+            free(message.bytes);
+            message = candidate;
+        } else {
+            free(candidate.bytes);
+        }
     }
-
-    Candidate message = find_message(symbols, symbol_count, max_rms);
-    free(symbols);
+    free(samples);
     if (message.bytes == NULL) {
         fprintf(stderr, "No valid TEXT LITE PX1000 C transmission was found.\n");
         return 1;
     }
 
+    fprintf(stderr, "Detected transmission at %u baud.\n", message.baud_rate);
     int wrote = print_message(&message);
     free(message.bytes);
     if (!wrote) {

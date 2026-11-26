@@ -37,18 +37,21 @@ processes the normalized PCM stream.
 
 ### 3. FSK demodulation
 
-`demodulate` examines overlapping 60-sample windows. It measures signal energy
-at the PX modem's two frequencies, 1300 Hz and 1700 Hz, and selects the
-stronger tone as the bit value. Each window also receives a tone-confidence
-value and an RMS level. These values let the frame search reject weak or
-ambiguous audio.
+`demodulate` examines overlapping windows sized for the candidate baud rate.
+It measures signal energy at the PX modem's two frequencies, 1300 Hz and
+1700 Hz, and selects the stronger tone as the bit value. Each window also
+receives a tone-confidence value and an RMS level. These values let the frame
+search reject weak or ambiguous audio.
 
 ### 4. Bit timing and serial-frame search
 
-`find_message` searches for the recorded profile at 300 baud. At the chosen
-22,050 Hz sample rate, one bit is about 73.5 samples. The search allows a
-small clock-error range and checks half-sample phase steps to accommodate
-recording and MP3 timing offsets.
+`main` tries all supported speeds: 300, 600, and 1200 baud. `find_message`
+searches each candidate bit period at the chosen 22,050 Hz sample rate. The
+period is swept over a small clock-error range, and half-sample phase steps
+accommodate recording and MP3 timing offsets. Detection windows are 60 samples
+at 300 baud, 30 at 600 baud, and 19 at 1200 baud. The 1200-baud period sweep
+uses finer increments because small timing errors accumulate quickly at that
+rate.
 
 The parser treats each serial frame as 11 bits: one zero start bit, seven
 data bits sent least-significant bit first, one even-parity bit, and two one
@@ -57,9 +60,9 @@ confidence. Consecutive valid frames form a candidate run; the longest
 readable run is retained, with a minimum length to avoid accepting isolated
 noise as a message.
 
-The current implementation is specific to this 300-baud, 1300/1700 Hz
-profile. Supporting other baud rates or serial formats requires changing the
-timing search and frame parser, then updating this file and `README.md`.
+The current implementation supports the 300, 600, and 1200-baud, 1300/1700 Hz
+profiles. Supporting other frequencies or serial formats requires changing
+the demodulator and frame parser, then updating this file and `README.md`.
 
 ### 5. Text output
 

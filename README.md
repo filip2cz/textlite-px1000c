@@ -20,7 +20,10 @@ every code, configuration, or documentation change.
 
 The decoder accepts audio formats supported by FFmpeg. It converts the input
 to mono, 16-bit PCM at 22,050 Hz before demodulating the 1300/1700 Hz FSK
-signal recorded at 300 baud. For a new recording, lossless WAV with mono,
+signal recorded at 300, 600, or 1200 baud. The decoder checks all three
+speeds automatically using rate-specific detection windows and reports the
+detected rate to standard error. For a
+new recording, lossless WAV with mono,
 16-bit PCM at 44.1 kHz is a good interchange format; the decoder will resample
 it internally.
 
