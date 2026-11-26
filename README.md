@@ -1,133 +1,135 @@
 # textlite-px1000c
-Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
-## What is here?
+Command-line tools for receiving and sending text over the audio modem in a
+TEXT LITE PX1000 C, plus a SIP responder that can answer calls with generated
+messages.
 
-`README.md` - this document
+## Quick start
 
-`LICENSE` - MIT License
-
-`decode.c` - C command-line decoder for PX1000 C audio transmissions
-
-`encode.c` - C command-line encoder from text to PX1000 C audio
-
-`sip.c` - SIP client that answers calls with command-generated PX audio
-
-`Makefile` - builds `decode`, `encode`, and conditionally `sip` (when PJSIP is available)
-
-`tests/` - test suite for `decode`, `encode`, and `sip`
-
-`shell.nix` - Nix development shell with the compiler and audio tools
-
-`pterodactyl/egg-sip.json` - importable Pterodactyl egg for the SIP responder
-
-`pterodactyl/start.sh` - source template for the egg's argument-safe startup wrapper
-
-`.github/workflows/main.yml` - GitHub Actions CI workflow for testing, multi-architecture cross-compilation (`decode`, `encode`, and static `sip`), QEMU smoke tests, and draft releases
-
-`.github/scripts/build_pjsip.sh` - CI helper script that builds minimal static PJSIP libraries for each target architecture
-
-`test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
-
-`AGENTS.md` - project conventions and detailed encoder/decoder architecture, designed for AI
-
-## Architecture and maintenance
-
-The encoder/decoder pipelines and coding conventions are documented in
-[AGENTS.md](AGENTS.md). Keep `AGENTS.md` and this README updated together with
-every code, configuration, or documentation change. C source comments explain
-the file's purpose at the top, along with protocol details, non-obvious
-algorithms, and cross-thread ownership where relevant.
-
-## Nix development shell
-
-Enter the project shell with:
+The easiest way to build is with the included Nix shell. It provides the
+compiler and libraries needed for all three programs:
 
 ```sh
 nix-shell
+make
 ```
 
-It provides a C compiler, FFmpeg for decoding, eSpeak NG for the optional
-`encode --speak` feature, and PJSIP plus its build tools for `sip`. Build the
-programs with the commands below while inside the shell.
+`make` builds `decode` and `encode`. It also builds `sip` when PJSIP is
+available. To decode a recording or create a WAV message:
+
+```sh
+./decode recording.mp3
+./encode -o message.wav "test abc123"
+```
+
+See [Dependencies](#dependencies) for the separate runtime and compilation
+requirements.
+
+## Dependencies
+
+### Runtime
+
+| Program or feature | Runtime dependencies |
+| --- | --- |
+| `decode` | FFmpeg, available as `ffmpeg` on `PATH` |
+| `encode` | None; eSpeak NG (`espeak-ng` on `PATH`) only when speech is enabled with `--speak` |
+| `sip` | The `encode` executable and `/bin/sh` for the configured command. A dynamically linked build also needs its PJSIP shared libraries and their runtime dependencies. |
+
+The Pterodactyl egg installs `sip` and `encode` as static musl binaries, so
+that deployment does not need PJSIP shared libraries. It bundles eSpeak NG
+for the optional speech feature. `decode` is not part of the egg.
+
+### Compilation
+
+All programs are C11/POSIX programs. Building with the Makefile requires a C
+compiler and `make`; `decode` and `encode` also link the system math library.
+`make` includes `sip` when PJSIP development files are available.
+
+| Target | Additional build requirements |
+| --- | --- |
+| `decode`, `encode` | No project-specific libraries beyond the C compiler and math library |
+| `sip` | PJSIP development files (`libpjproject` headers and libraries), `pkg-config`, and POSIX threads; PJSIP's pkg-config metadata supplies its link flags |
+
+To run `make test`, also install Bash, Python 3, FFmpeg, eSpeak NG, and the
+PJSIP `pjsua` command-line client. The test target builds all three programs,
+so the `sip` compilation requirements apply as well.
 
 ## Decode a recording
 
-The decoder accepts audio formats supported by FFmpeg. It converts the input
-to mono, 16-bit PCM at 22,050 Hz before demodulating the 1300/1700 Hz FSK
-signal recorded at 300, 600, or 1200 baud. The decoder checks all three
-speeds automatically using rate-specific detection windows. By default it
-prints only the decoded text; add `-v` to report the detected rate to standard
-error. For a new recording, lossless WAV with mono, 16-bit PCM at 44.1 kHz is
-a good interchange format; the decoder will resample it internally.
+`decode` accepts an audio file supported by FFmpeg. It converts the audio to
+mono, signed 16-bit PCM at 22,050 Hz, then searches for PX FSK transmissions at
+300, 600, or 1200 baud. The supported signal uses 1300 Hz and 1700 Hz tones
+and 7E2 serial frames. The baud rate is detected automatically.
 
-Build it with a C compiler and the math library:
+```sh
+./decode recording.mp3
+./decode -v recording.wav
+```
+
+Decoded text goes to standard output. `-v` also prints the detected baud rate
+to standard error. FFmpeg must be installed and available as `ffmpeg` on
+`PATH`.
+
+To build just the decoder without Nix:
 
 ```sh
 cc -std=c11 -O2 -Wall -Wextra decode.c -lm -o decode
 ```
 
-FFmpeg must be installed and available as `ffmpeg` on `PATH`. Then run:
+## Encode a message
+
+`encode` creates a mono, signed 16-bit PCM WAV file at 44,100 Hz. It accepts
+printable 7-bit ASCII, tabs, and line breaks, and supports 300, 600, and 1200
+baud. Text can be passed as an argument or read from redirected standard
+input:
 
 ```sh
-./decode test_abc123-300Bd.mp3
-./decode -v test_abc123-1200Bd.mp3
+./encode -o message.wav "test abc123"
+./encode -b 1200 -o message.wav "test abc123"
+printf '%s' "test abc123" | ./encode -o message.wav
 ```
 
-An invalid invocation prints the decoder's usage and option summary to standard error.
+Options:
 
-## Encode text
+| Option | Purpose | Default |
+| --- | --- | --- |
+| `-o path` | Output WAV path | `encoded.wav` |
+| `-b baud` | Baud rate: 300, 600, or 1200 | 300 |
+| `-m value` | Margin byte, from 0 to 127 | 40 |
+| `-s`, `--speak` | Speak the message before the modem transmission; needs `espeak-ng` | Off |
+| `-l`, `--lang code` | eSpeak NG voice or language code | eSpeak NG default |
+| `-g`, `--gap seconds` | Silence after speech, from 0 to 600 seconds | 3 seconds |
 
-`encode.c` writes a mono, 16-bit PCM WAV file at 44.1 kHz. It accepts printable
-7-bit ASCII text and generates a 300, 600, or 1200-baud PX audio transmission.
-Use `-b` to select the baud rate; the default is 300. The default margin byte
-is 40; use `-m` to select a value from 0 to 127. The default output is
-`encoded.wav`, or use `-o` to choose another path. Optional text-to-speech can
-read the message before the modem signal with `-s` or `--speak`; this requires
-eSpeak NG to be installed and available as `espeak-ng`. The default silence
-between the spoken text and transmission is 3 seconds. Set it with `-g` or
-`--gap`, using a value from 0 to 600 seconds. The encoder accepts eSpeak NG's
-streamed WAV output and converts it to the output file's mono 44.1 kHz format.
-Select the speech language with `-l` or `--lang`, using an eSpeak NG voice code
-such as `cs` or `en-us`; without it, eSpeak NG's default voice is used. List
-available codes with `espeak-ng --voices`.
+For example, to speak the message in Czech before sending it:
 
-Build and encode a message:
+```sh
+./encode --speak --lang cs --gap 3 -o message.wav "test abc123"
+```
+
+Without text arguments, `encode` reads redirected input. Interactive or empty
+input displays the usage help. Speech is optional; without `--speak`, eSpeak
+NG is not run. To build just the encoder without Nix:
 
 ```sh
 cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
-./encode -o message.wav "test abc123"
-./encode -b 1200 -o message.wav "test abc123"
-./encode --speak --gap 3 -o message.wav "test abc123"
-./encode --speak --lang cs -o message.wav "test abc123"
 ```
 
-If the text argument is omitted, the encoder reads text from redirected standard
-input. When run interactively without text, or with empty input, it prints the
-encoder's usage, options, and defaults to standard error. `--speak` reads the
-message text before the encoded transmission; the gap setting controls the
-silence between them. The encoded text's terminating carriage returns are not
-spoken.
+## Answer calls with SIP
 
-## Answer SIP calls with an encoded message
-
-`sip.c` registers a SIP account over UDP and automatically answers one incoming
-call at a time. It runs the selected shell command, passes its standard output
-to `encode`, plays the resulting WAV into the call, and hangs up when playback
+`sip` registers one SIP account over UDP and answers one incoming call at a
+time. It runs a shell command, passes the command's standard output to
+`encode`, plays the resulting WAV into the call, and hangs up when playback
 finishes. Command output must be valid encoder input and is limited to 7,400
-bytes. If another call arrives while one is being handled, it is rejected as
-busy. The command is executed by `/bin/sh -c` in its own process group, so
-shutdown can stop shell descendants. PJSUA callbacks update mutex-protected
-call state; a worker thread handles command execution, encoding, playback, and
-cleanup.
+bytes. A concurrent incoming call is rejected as busy.
 
-Build it inside `nix-shell`:
+Build inside `nix-shell` (or another environment with PJSIP's
+`libpjproject` pkg-config metadata):
 
 ```sh
 cc -std=c11 -O2 -Wall -Wextra sip.c -o sip $(pkg-config --static --cflags --libs libpjproject) -pthread
 ```
 
-Set the SIP password in the environment, then start the client:
+Set the account password in the environment and start the responder:
 
 ```sh
 export SIP_PASSWORD='your-sip-password'
@@ -136,65 +138,84 @@ export SIP_PASSWORD='your-sip-password'
   --command 'printf "%s\\n" "test abc123"' --encoder ./encode
 ```
 
-`--registrar`, `--identity`, `--username`, and `--command` are required. The
-password may instead be supplied with `--password`. The local SIP UDP port
-defaults to 0 (automatically picking an available ephemeral port); use
-`--port N` to bind a specific port. RTP audio also uses an ephemeral port by
-default; use `--rtp-port N` to select a fixed RTP port, with RTCP on the
-following port. Use `--public-address IPv4` when the host is behind NAT so SIP
-and RTP SDP advertise its public address. By default PJSIP binds on all local
-interfaces; use `--bind eth0` to select an interface or `--bind 192.0.2.10`
-to select one of its IPv4 addresses. For an interface name, `sip` uses its
-first listed IPv4 address. The selected address is used for both SIP signaling
-and RTP audio. The baud rate defaults to 300 and accepts
-300, 600, or 1200. Additional encoder parameters can be configured with
-`--margin` (`-m`), `--speak` (`-s`), `--lang` (`-l`), `--gap` (`-g`),
-repeatable `--encoder-arg`, or trailing arguments after `--`. To preserve FSK
-modem tones, `sip` disables VAD and echo cancellation and prefers waveform
-codecs (`PCMA`, `PCMU`, `G.722`) over speech vocoders. Stop the client with
-Ctrl+C.
+Required options are `--registrar`, `--identity`, `--username`, and
+`--command`. The password can instead be passed with `--password`. Useful
+network and encoder options are:
 
-### Deploy with Pterodactyl
+| Option | Purpose |
+| --- | --- |
+| `--encoder path` | Encoder executable; default is `./encode` |
+| `--port N` | Local SIP UDP port; default 0 selects an available port |
+| `--rtp-port N` | Local even RTP UDP port; default 0 selects one automatically; RTCP uses the next port |
+| `--bind address-or-interface` | Local IPv4 address or interface name; default binds all interfaces |
+| `--public-address IPv4` | Public IPv4 address advertised in SIP and RTP SDP, for hosts behind NAT |
+| `--baud N` | Encoder baud rate: 300, 600, or 1200; default 300 |
+| `--margin N` | Encoder margin byte, from 0 to 127; default 40 |
+| `--speak`, `--lang code`, `--gap seconds` | Pass speech options through to `encode` |
+| `--encoder-arg ARG` | Forward an additional argument to `encode`; may be repeated |
+| `-- ARG...` | Forward trailing arguments to `encode` |
+| `-h`, `--help` | Show the full option summary |
 
-Import [pterodactyl/egg-sip.json](pterodactyl/egg-sip.json) from Admin → Eggs →
-Import Egg. The egg clones its configured Git repository and branch during
-installation, builds PJSIP 2.16 statically, and copies `sip` and `encode` into
-the server directory. It uses an Alpine installer and defaults to the official
-Alpine Pterodactyl runtime image. The programs are statically linked with
-musl, so the runtime image does not need PJSIP or compiler libraries. The
-installer also bundles eSpeak NG, its libraries, and voice data in the server
-directory, then installs a launcher that uses the bundled musl loader. Speech
-therefore works without eSpeak NG or musl in the runtime image. The PTDL_v2 egg
-metadata includes an email-formatted
-author and text field types for all variables, as expected by current Panel egg
-exports. Its startup-detection configuration is JSON encoded inside a string,
-as required by the Panel importer.
+The `--bind` address applies to SIP and RTP. When binding by interface name,
+the first listed IPv4 address is used. If the server is behind NAT, configure
+`--public-address` with an IPv4 address reachable by the SIP provider. `sip`
+disables VAD and echo cancellation and prioritizes waveform codecs so FSK
+tones are preserved. Stop it with Ctrl+C.
 
-Assign a UDP allocation for SIP and set that as the server's primary allocation.
-The egg binds SIP to that port. Also allocate the RTP UDP port and the following
-RTCP port; the default RTP port is 40000, so those allocations are 40000 and
-40001. Set the egg's RTP Port value to the first of those ports. These UDP
-allocations must be reachable from the SIP provider for call audio to work.
-The startup wrapper advertises Pterodactyl's `SERVER_IP` in SIP and RTP SDP by
-default. If that address is behind another NAT, set Public IPv4 Address to the
-IPv4 address reachable by the SIP provider.
+### Pterodactyl deployment
+
+Import [the SIP egg](pterodactyl/egg-sip.json) from Admin → Eggs → Import Egg.
+The installer clones the configured repository and branch, builds PJSIP 2.16
+and statically links `sip` and `encode` with musl. It also bundles eSpeak NG,
+its libraries, and voice data, so speech works without eSpeak NG in the
+runtime image.
+
+Allocate a UDP port for SIP and set it as the server's primary allocation.
+Also allocate the configured RTP port and the following port for RTCP. The
+default RTP port is 40000, so allocate UDP ports 40000 and 40001. These ports
+must be reachable from the SIP provider for call audio to work. The startup
+wrapper advertises Pterodactyl's `SERVER_IP`; if it is behind another NAT, set
+the egg's Public IPv4 Address to the externally reachable address.
 
 Set the registrar, account identity, authentication username, password, and
-text command in the server's Startup settings. The command's standard output
-becomes the transmitted message. The password is passed through `SIP_PASSWORD`
-instead of the startup command. Enable Speak Message to speak the text before
-the encoded transmission; eSpeak NG is installed by the egg's install script.
+message command in the egg's Startup settings. The command's standard output
+becomes the transmitted message. The password is passed through
+`SIP_PASSWORD`. Enable Speak Message in Startup to have eSpeak NG read the
+message before its modem transmission.
 
-## Development note
+## Development
 
-This project was vibecoded with OpenAI Codex using the GPT-6 Luna model.
-Development tools included a C compiler (`cc`), FFmpeg for audio conversion and
-inspection, and Python 3 for signal analysis. Protocol details were checked
-against the [PX-1000 technical manual](https://www.cryptomuseum.com/crypto/philips/px1000/files/px1000_service_manual.pdf)
+The project has three POSIX C command-line programs: `decode`, `encode`, and
+`sip`. The Makefile builds the available programs and runs the test suite:
+
+```sh
+make
+make test
+```
+
+The Nix shell is started from the project directory with `nix-shell`. It
+includes the compiler, FFmpeg, eSpeak NG, PJSIP, pkg-config, OpenSSL, and ALSA
+link libraries. See [AGENTS.md](AGENTS.md) for the detailed architecture and
+map of the implementation in each source file. Keep it and this README in
+sync with code and configuration changes.
+
+## Project files
+
+- `decode.c`, `encode.c`, `sip.c` — decoder, encoder, and SIP responder
+- `Makefile` — local build and test targets
+- `LICENSE` — MIT license
+- `tests/` — test suite for the command-line tools
+- `shell.nix` — Nix development environment
+- `pterodactyl/egg-sip.json`, `pterodactyl/start.sh` — Pterodactyl egg and startup wrapper
+- `.github/workflows/main.yml` — CI, cross-compilation, QEMU smoke tests, and draft releases
+- `.github/scripts/build_pjsip.sh` — static PJSIP build helper used by CI and the egg
+- `test_abc123-*.mp3` — sample recordings carrying `test abc123` at different speeds
+- `AGENTS.md` — agent instructions and map of the implementation in each source file
+
+## Development tools and protocol references
+
+This project was developed with OpenAI Codex using the GPT-6 Luna model.
+Development tools included a C compiler (`cc`), FFmpeg for audio conversion
+and inspection, and Python 3 for signal analysis. Protocol details were
+checked against the [PX-1000 technical manual](https://www.cryptomuseum.com/crypto/philips/px1000/files/px1000_service_manual.pdf)
 and the [PX 1000 C operating instructions](https://www.manualslib.com/manual/3453877/Text-Lite-Px-1000-C.html).
-
-At runtime, `decode` requires FFmpeg. `encode` writes WAV directly and does not
-require FFmpeg or Python. eSpeak NG is an optional runtime dependency when
-`encode --speak` is used. `sip` requires PJSIP when it is built and the
-`encode` executable at runtime. The Pterodactyl egg statically links PJSIP into
-`sip`.
