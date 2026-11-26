@@ -171,6 +171,21 @@ encoder's speech option is used; PJSIP is needed by `sip`. Enter the shell from
 the project directory with `nix-shell`. Keep this dependency list consistent
 with the runtime requirements in this file and `README.md`.
 
+### 10. Pterodactyl Egg
+
+`egg-textlite-px1000c.json` is a `PTDL_v2` egg for Pterodactyl Panel running
+`sip` with `./encode` inside `ghcr.io/pterodactyl/yolks:debian`. Its
+installation script runs in `ghcr.io/pterodactyl/installers:debian`, downloads
+prebuilt architecture-matched release binaries (`sip-linux-*`, `encode-linux-*`,
+`decode-linux-*`) when a published GitHub release exists (or builds statically
+from source via `.github/scripts/build_pjsip.sh` when `VERSION=main` or no
+published release is available), and writes `/mnt/server/start.sh`. At runtime,
+`start.sh` forwards Pterodactyl's allocated `{{SERVER_PORT}}` and egg variables
+(`SIP_REGISTRAR`, `SIP_IDENTITY`, `SIP_USERNAME`, `SIP_PASSWORD`,
+`SIP_COMMAND`, `BAUD_RATE`, `MARGIN`, `SPEAK`, `SPEECH_LANG`, `SPEECH_GAP`,
+`EXTRA_ENCODER_ARGS`) safely to `exec ./sip`. Startup detection watches for
+`SIP client started; waiting for incoming calls.` and stop sends `^C` (`SIGINT`).
+
 ## Build and run
 
 Build with a C11 compiler, POSIX process APIs, and the math library:
