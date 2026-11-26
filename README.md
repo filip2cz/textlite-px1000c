@@ -11,6 +11,8 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `encode.c` - C command-line encoder from text to PX1000 C audio
 
+`shell.nix` - Nix development shell with the compiler and audio tools
+
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
 
 `AGENTS.md` - project conventions and detailed encoder/decoder architecture, designed for AI
@@ -20,6 +22,18 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 The encoder/decoder pipelines and coding conventions are documented in
 [AGENTS.md](AGENTS.md). Keep `AGENTS.md` and this README updated together with
 every code, configuration, or documentation change.
+
+## Nix development shell
+
+Enter the project shell with:
+
+```sh
+nix-shell
+```
+
+It provides a C compiler, FFmpeg for decoding, and eSpeak NG for the optional
+`encode --speak` feature. Build either program with the commands below while
+inside the shell.
 
 ## Decode a recording
 

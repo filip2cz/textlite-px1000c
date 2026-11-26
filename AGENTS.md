@@ -123,6 +123,14 @@ waited for, and a non-zero child status is treated as an input error. The
 encoder also waits for the optional eSpeak NG child and rejects failed speech
 synthesis or unsupported speech WAV data.
 
+### 8. Nix development shell
+
+`shell.nix` defines a `pkgs.mkShell` environment containing the Nixpkgs C
+compiler, FFmpeg, and eSpeak NG. FFmpeg is needed by the decoder at runtime;
+eSpeak NG is needed only when the encoder's speech option is used. Enter the
+shell from the project directory with `nix-shell`. Keep this dependency list
+consistent with the runtime requirements in this file and `README.md`.
+
 ## Build and run
 
 Build with a C11 compiler, POSIX process APIs, and the math library:
