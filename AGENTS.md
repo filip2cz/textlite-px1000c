@@ -151,7 +151,10 @@ The SIP program requires a registrar URI, account identity URI, authentication
 username, and command. A password may be supplied through `SIP_PASSWORD` or
 `--password`. The encoder path defaults to `./encode`, the baud rate to 300,
 and the local UDP SIP port to 0 (ephemeral port). Other supported baud rates are 600 and
-1200. Build using PJSIP's `libpjproject` pkg-config metadata.
+1200. Encoder options `--margin`, `--speak`, `--lang`, and `--gap` map to
+`encode`'s `-m`, `-s`, `-l`, and `-g` flags; `--encoder-arg` (repeatable) and
+trailing arguments after `--` forward additional arguments to the encoder.
+Build using PJSIP's `libpjproject` pkg-config metadata.
 
 ### 9. Nix development shell
 

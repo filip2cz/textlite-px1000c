@@ -123,9 +123,12 @@ export SIP_PASSWORD='your-sip-password'
 password may instead be supplied with `--password`. The local SIP UDP port
 defaults to 0 (automatically picking an available ephemeral port); use
 `--port N` to bind a specific port. The baud rate defaults to 300 and accepts
-300, 600, or 1200. To preserve FSK modem tones, `sip` disables VAD and echo
-cancellation and prefers waveform codecs (`PCMA`, `PCMU`, `G.722`) over speech
-vocoders. Stop the client with Ctrl+C.
+300, 600, or 1200. Additional encoder parameters can be configured with
+`--margin` (`-m`), `--speak` (`-s`), `--lang` (`-l`), `--gap` (`-g`),
+repeatable `--encoder-arg`, or trailing arguments after `--`. To preserve FSK
+modem tones, `sip` disables VAD and echo cancellation and prefers waveform
+codecs (`PCMA`, `PCMU`, `G.722`) over speech vocoders. Stop the client with
+Ctrl+C.
 
 ## Development note
 

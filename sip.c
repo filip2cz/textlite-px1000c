@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <pjmedia/wav_port.h>
 #include <pjsua-lib/pjsua.h>
 #include <pthread.h>
@@ -22,7 +23,8 @@ enum {
     MAX_COMMAND_OUTPUT = 7400,
     DEFAULT_SIP_PORT = 0,
     MEDIA_WAIT_SECONDS = 30,
-    PLAYBACK_TIMEOUT_MARGIN_SECONDS = 30
+    PLAYBACK_TIMEOUT_MARGIN_SECONDS = 30,
+    MAX_ENCODER_ARGS = 64
 };
 
 typedef struct {
@@ -33,6 +35,13 @@ typedef struct {
     const char *command;
     const char *encoder;
     unsigned baud_rate;
+    int margin_set;
+    unsigned margin;
+    int speak;
+    const char *speech_language;
+    const char *gap_seconds;
+    const char *extra_encoder_args[MAX_ENCODER_ARGS];
+    size_t extra_encoder_arg_count;
     unsigned local_port;
 } AppConfig;
 
@@ -292,9 +301,35 @@ static int run_encoder(const AppConfig *config, const char *wav_path,
     }
 
     char baud_text[16];
+    char margin_text[16];
     snprintf(baud_text, sizeof(baud_text), "%u", config->baud_rate);
-    char *arguments[] = {(char *)config->encoder, "-o", (char *)wav_path,
-                         "-b", baud_text, NULL};
+
+    char *arguments[16 + MAX_ENCODER_ARGS];
+    size_t argc = 0;
+    arguments[argc++] = (char *)config->encoder;
+    arguments[argc++] = "-o";
+    arguments[argc++] = (char *)wav_path;
+    arguments[argc++] = "-b";
+    arguments[argc++] = baud_text;
+    if (config->margin_set) {
+        snprintf(margin_text, sizeof(margin_text), "%u", config->margin);
+        arguments[argc++] = "-m";
+        arguments[argc++] = margin_text;
+    }
+    if (config->speak)
+        arguments[argc++] = "-s";
+    if (config->speech_language != NULL) {
+        arguments[argc++] = "-l";
+        arguments[argc++] = (char *)config->speech_language;
+    }
+    if (config->gap_seconds != NULL) {
+        arguments[argc++] = "-g";
+        arguments[argc++] = (char *)config->gap_seconds;
+    }
+    for (size_t i = 0; i < config->extra_encoder_arg_count; ++i)
+        arguments[argc++] = (char *)config->extra_encoder_args[i];
+    arguments[argc] = NULL;
+
     pid_t child = -1;
     error = posix_spawnp(&child, config->encoder, &actions, NULL,
                          arguments, environ);
@@ -669,10 +704,32 @@ static int parse_unsigned(const char *text, unsigned minimum, unsigned maximum,
     return 0;
 }
 
+static int parse_gap_text(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    double value = strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !isfinite(value) ||
+        value < 0.0 || value > 600.0)
+        return -1;
+    return 0;
+}
+
+static int add_extra_encoder_arg(AppConfig *config, const char *argument)
+{
+    if (config->extra_encoder_arg_count >= MAX_ENCODER_ARGS) {
+        fprintf(stderr, "Too many extra encoder arguments (max %u).\n",
+                (unsigned)MAX_ENCODER_ARGS);
+        return -1;
+    }
+    config->extra_encoder_args[config->extra_encoder_arg_count++] = argument;
+    return 0;
+}
+
 static void print_usage(const char *program)
 {
     fprintf(stderr,
-            "Usage: %s --registrar sip:host --identity sip:user@host --username name --command shell-command [options]\n",
+            "Usage: %s --registrar sip:host --identity sip:user@host --username name --command shell-command [options] [-- encoder-args...]\n",
             program);
     fprintf(stderr, "Options:\n");
     fprintf(stderr, "  --registrar URI       SIP registrar URI (required; UDP).\n");
@@ -682,6 +739,12 @@ static void print_usage(const char *program)
     fprintf(stderr, "  --command command     Shell command whose stdout becomes the message.\n");
     fprintf(stderr, "  --encoder path        Encoder program (default: ./encode).\n");
     fprintf(stderr, "  --baud rate           300, 600, or 1200 (default: 300).\n");
+    fprintf(stderr, "  --margin value        Encoder margin byte, 0 to 127 (default: 40).\n");
+    fprintf(stderr, "  --speak               Enable speech before transmission (encode -s).\n");
+    fprintf(stderr, "  --lang code           eSpeak NG language/voice code (encode -l).\n");
+    fprintf(stderr, "  --gap seconds         Silence after speech, 0 to 600 (encode -g).\n");
+    fprintf(stderr, "  --encoder-arg arg     Extra argument forwarded to encoder (repeatable).\n");
+    fprintf(stderr, "  --                    Forward all remaining arguments to encoder.\n");
     fprintf(stderr, "  --port number         Local UDP port, 0 to 65535 (default: 0, auto).\n");
     fprintf(stderr, "  -h, --help            Show this help.\n");
     fprintf(stderr, "The client answers one call at a time and hangs up after playback.\n");
@@ -700,6 +763,17 @@ static int parse_arguments(int argc, char **argv, AppConfig *config)
         if (strcmp(option, "-h") == 0 || strcmp(option, "--help") == 0) {
             print_usage(argv[0]);
             return 1;
+        }
+        if (strcmp(option, "--speak") == 0) {
+            config->speak = 1;
+            continue;
+        }
+        if (strcmp(option, "--") == 0) {
+            while (index < argc) {
+                if (add_extra_encoder_arg(config, argv[index++]) != 0)
+                    return -1;
+            }
+            break;
         }
         if (index >= argc) {
             print_usage(argv[0]);
@@ -725,6 +799,27 @@ static int parse_arguments(int argc, char **argv, AppConfig *config)
                 fprintf(stderr, "Baud rate must be 300, 600, or 1200.\n");
                 return -1;
             }
+        } else if (strcmp(option, "--margin") == 0) {
+            if (parse_unsigned(value, 0, 127, &config->margin) != 0) {
+                fprintf(stderr, "Margin must be an integer from 0 to 127.\n");
+                return -1;
+            }
+            config->margin_set = 1;
+        } else if (strcmp(option, "--lang") == 0) {
+            if (value[0] == '\0' || value[0] == '-') {
+                fprintf(stderr, "Language must be an eSpeak NG voice code, such as cs or en-us.\n");
+                return -1;
+            }
+            config->speech_language = value;
+        } else if (strcmp(option, "--gap") == 0) {
+            if (parse_gap_text(value) != 0) {
+                fprintf(stderr, "Gap must be a number from 0 to 600 seconds.\n");
+                return -1;
+            }
+            config->gap_seconds = value;
+        } else if (strcmp(option, "--encoder-arg") == 0) {
+            if (add_extra_encoder_arg(config, value) != 0)
+                return -1;
         } else if (strcmp(option, "--port") == 0) {
             if (parse_unsigned(value, 0, 65535, &config->local_port) != 0) {
                 fprintf(stderr, "Local SIP port must be from 0 to 65535.\n");
