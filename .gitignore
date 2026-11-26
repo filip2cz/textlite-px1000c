@@ -2,3 +2,4 @@
 /encode
 /sip
 /message*
+__pycache__
