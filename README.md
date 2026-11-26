@@ -1,13 +1,18 @@
 # textlite-px1000c
 Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
-## What is there?
+## What is here?
 
 `README.md` - this document
+
 `LICENSE` - MIT License
+
 `decode.c` - C command-line decoder for PX1000 C audio transmissions
+
 `encode.c` - C command-line encoder from text to PX1000 C audio
+
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
+
 `AGENTS.md` - project conventions and detailed encoder/decoder architecture, designed for AI
 
 ## Architecture and maintenance
