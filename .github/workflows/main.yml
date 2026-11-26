@@ -1,0 +1,240 @@
+name: Build and test textlite-px1000c
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    name: Test with Nix
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          nix_path: nixpkgs=channel:nixos-unstable
+
+      - name: Run test suite in nix-shell
+        run: |
+          nix-shell --run "./tests/run_tests.sh"
+
+  build-x86:
+    name: Build x86 binaries
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install x86 toolchains
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc gcc-multilib
+
+      - name: Compile x86 binaries
+        run: |
+          mkdir -p build
+          gcc -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-x64
+          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-x86
+          gcc -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-x64
+          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-x86
+
+      - name: Upload x86 binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86
+          path: |
+            build/decode-linux-x64
+            build/decode-linux-x86
+            build/encode-linux-x64
+            build/encode-linux-x86
+          if-no-files-found: error
+
+  build-arm:
+    name: Build AArch64 and ARMv7 binaries
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install ARM toolchains and development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabihf libc6-dev-arm64-cross libc6-dev-armhf-cross
+
+      - name: Compile AArch64 and ARMv7 binaries
+        run: |
+          mkdir -p build
+          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-aarch64
+          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-armv7l
+          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-aarch64
+          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-armv7l
+
+      - name: Upload AArch64 and ARMv7 binaries
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-arm
+          path: |
+            build/decode-linux-aarch64
+            build/decode-linux-armv7l
+            build/encode-linux-aarch64
+            build/encode-linux-armv7l
+          if-no-files-found: error
+
+  build-armv5:
+    name: Build ARMv5 binary
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install ARMv5 toolchain and development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-arm-linux-gnueabi libc6-dev-armel-cross
+
+      - name: Compile ARMv5 binary
+        run: |
+          mkdir -p build
+          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-armv5te
+          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-armv5te
+
+      - name: Upload ARMv5 binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-armv5
+          path: |
+            build/decode-linux-armv5te
+            build/encode-linux-armv5te
+          if-no-files-found: error
+
+  build-riscv64:
+    name: Build RISC-V 64-bit binary
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Install RISC-V toolchain and development headers
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+
+      - name: Compile RISC-V 64-bit binary
+        run: |
+          mkdir -p build
+          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror decode.c -lm -o build/decode-linux-riscv64
+          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror encode.c -lm -o build/encode-linux-riscv64
+
+      - name: Upload RISC-V binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-riscv64
+          path: |
+            build/decode-linux-riscv64
+            build/encode-linux-riscv64
+          if-no-files-found: error
+
+  verify-binaries:
+    name: Smoke test architecture binaries
+    needs:
+      - build-x86
+      - build-arm
+      - build-armv5
+      - build-riscv64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download all architecture binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: build
+          merge-multiple: true
+
+      - name: Install emulators and target runtimes
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y binutils qemu-user libc6-i386 libc6-arm64-cross libc6-armhf-cross libc6-armel-cross libc6-riscv64-cross
+
+      - name: Run binary smoke tests
+        run: |
+          set -euo pipefail
+          chmod +x build/*-linux-*
+
+          check_help() {
+            name="$1"
+            expected="$2"
+            shift 2
+            output="/tmp/${name}-help.txt"
+            "$@" -h > "$output" 2>&1 || true
+            grep -q "$expected" "$output"
+            echo "PASS: $name -h"
+          }
+
+          check_help decode-linux-x64 "Usage: .*decode" ./build/decode-linux-x64
+          check_help decode-linux-x86 "Usage: .*decode" ./build/decode-linux-x86
+          check_help decode-linux-aarch64 "Usage: .*decode" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/decode-linux-aarch64
+          check_help decode-linux-armv7l "Usage: .*decode" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/decode-linux-armv7l
+          check_help decode-linux-armv5te "Usage: .*decode" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/decode-linux-armv5te
+          check_help decode-linux-riscv64 "Usage: .*decode" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/decode-linux-riscv64
+
+          check_help encode-linux-x64 "Usage: .*encode" ./build/encode-linux-x64
+          check_help encode-linux-x86 "Usage: .*encode" ./build/encode-linux-x86
+          check_help encode-linux-aarch64 "Usage: .*encode" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/encode-linux-aarch64
+          check_help encode-linux-armv7l "Usage: .*encode" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/encode-linux-armv7l
+          check_help encode-linux-armv5te "Usage: .*encode" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/encode-linux-armv5te
+          check_help encode-linux-riscv64 "Usage: .*encode" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/encode-linux-riscv64
+
+          for binary in build/*-linux-*; do
+            test -s "$binary"
+          done
+
+          readelf -h build/decode-linux-riscv64 > /tmp/decode-linux-riscv64-elf.txt
+          grep -q 'Class:.*ELF64' /tmp/decode-linux-riscv64-elf.txt
+          grep -q 'Machine:.*RISC-V' /tmp/decode-linux-riscv64-elf.txt
+          echo "PASS: decode-linux-riscv64 ELF format and architecture"
+
+  release:
+    name: Create draft release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - test
+      - verify-binaries
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v6
+
+      - name: Download all architecture binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: build
+          merge-multiple: true
+
+      - name: Set release tag
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        uses: ncipollo/release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          artifacts: "build/*-linux-*"
+          commit: ${{ github.sha }}
+          generateReleaseNotes: true
+          draft: true
+          tag: ${{ steps.vars.outputs.sha_short }}

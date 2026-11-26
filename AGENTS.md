@@ -17,6 +17,8 @@
 The project contains three POSIX C command-line tools. `decode.c` and
 `encode.c` implement the audio receive and send paths. `sip.c` uses PJSIP for
 SIP signaling and audio transport, and connects incoming calls to the encoder.
+A `Makefile` handles building the tools and running the test suite. CI is
+defined in `.github/workflows/main.yml`.
 
 ### 1. Command-line entry point
 

@@ -13,7 +13,13 @@ Tools for decoding audio data transfers from a TEXT LITE PX1000 C.
 
 `sip.c` - SIP client that answers calls with command-generated PX audio
 
+`Makefile` - builds `decode`, `encode`, and conditionally `sip` (when PJSIP is available)
+
+`tests/` - test suite for `decode`, `encode`, and `sip`
+
 `shell.nix` - Nix development shell with the compiler and audio tools
+
+`.github/workflows/main.yml` - GitHub Actions CI workflow for testing, cross-compilation, and draft releases
 
 `test_abc123-xBd.mp3` - test recordings; its transmitted text includes `test abc123`, in speed x Bd
 
