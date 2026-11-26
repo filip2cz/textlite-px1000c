@@ -95,15 +95,33 @@ header, then 7E2-framed bytes for the margin and text, followed by 32 ASCII
 0x04 end-of-text bytes and a one-second MARK tone. This is the normal,
 unencrypted text path.
 
+When `-s` or `--speak` is selected, `synthesize_speech` runs the optional
+`espeak-ng` executable as a child process without a shell and captures its WAV
+output through a pipe. The parent parses RIFF PCM chunks, accepts mono or
+stereo 16-bit PCM at 8,000 to 192,000 Hz, downmixes stereo to mono, and
+linearly resamples speech to the encoder's 44,100 Hz rate. eSpeak NG's WAV
+stream uses placeholder RIFF/data sizes, so a data chunk declaring more bytes
+than were captured is treated as extending to end of stream. It appends this
+speech before the PX synchronization header. A configurable silence follows
+the speech; `-g` or `--gap` selects its length in seconds, with a default of 3
+seconds and an accepted range of 0 to 600 seconds. Only trailing terminator
+carriage returns are removed from the spoken text; internal line breaks and
+tabs become spaces. Without `--speak`, encoding does not invoke a TTS program.
+
 The encoder defaults to 300 baud and `encoded.wav`; `-b` selects 300, 600, or
-1200 baud, while `-o` selects another output path. It does not depend on
-FFmpeg because it writes PCM WAV directly.
+1200 baud, while `-o` selects another output path. `-m` selects the margin
+byte. `-s` enables speech and `-g` sets the silence after it. Invalid command
+lines print the usage syntax and a summary of `-o`, `-m`, `-b`, `-s`, `-g`,
+`--`, and text/stdin input. It does not depend on FFmpeg because it writes PCM
+WAV directly; eSpeak NG is required only for the optional speech path.
 
 ### 7. Memory and process cleanup
 
 Each stage reports failure to its caller. `main` frees PCM samples, demodulated
 symbols, and candidate bytes as the pipeline completes. The FFmpeg child is
-waited for, and a non-zero child status is treated as an input error.
+waited for, and a non-zero child status is treated as an input error. The
+encoder also waits for the optional eSpeak NG child and rejects failed speech
+synthesis or unsupported speech WAV data.
 
 ## Build and run
 
@@ -131,5 +149,6 @@ Pass text directly, or omit it to read from standard input:
 ```sh
 ./encode -o message.wav "test abc123"
 ./encode -b 1200 -o message.wav "test abc123"
+./encode --speak --gap 3 -o message.wav "test abc123"
 printf '%s' "test abc123" | ./encode -o message.wav
 ```

@@ -52,7 +52,12 @@ An invalid invocation prints the decoder's usage and option summary to standard 
 7-bit ASCII text and generates a 300, 600, or 1200-baud PX audio transmission.
 Use `-b` to select the baud rate; the default is 300. The default margin byte
 is 40; use `-m` to select a value from 0 to 127. The default output is
-`encoded.wav`, or use `-o` to choose another path.
+`encoded.wav`, or use `-o` to choose another path. Optional text-to-speech can
+read the message before the modem signal with `-s` or `--speak`; this requires
+eSpeak NG to be installed and available as `espeak-ng`. The default silence
+between the spoken text and transmission is 3 seconds. Set it with `-g` or
+`--gap`, using a value from 0 to 600 seconds. The encoder accepts eSpeak NG's
+streamed WAV output and converts it to the output file's mono 44.1 kHz format.
 
 Build and encode a message:
 
@@ -60,11 +65,15 @@ Build and encode a message:
 cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 ./encode -o message.wav "test abc123"
 ./encode -b 1200 -o message.wav "test abc123"
+./encode --speak --gap 3 -o message.wav "test abc123"
 ```
 
 If the text argument is omitted, the encoder reads text from redirected standard
 input. When run interactively without text, or with empty input, it prints the
-encoder's usage, options, and defaults to standard error.
+encoder's usage, options, and defaults to standard error. `--speak` reads the
+message text before the encoded transmission; the gap setting controls the
+silence between them. The encoded text's terminating carriage returns are not
+spoken.
 
 ## Development note
 
@@ -75,4 +84,5 @@ against the [PX-1000 technical manual](https://www.cryptomuseum.com/crypto/phili
 and the [PX 1000 C operating instructions](https://www.manualslib.com/manual/3453877/Text-Lite-Px-1000-C.html).
 
 At runtime, `decode` requires FFmpeg. `encode` writes WAV directly and does not
-require FFmpeg or Python.
+require FFmpeg or Python. eSpeak NG is an optional runtime dependency when
+`encode --speak` is used.
