@@ -12,7 +12,8 @@ import unittest
 from helpers import (
     DECODE_BIN,
     ENCODE_BIN,
-    SIP_BIN,
+    SIP_DIALOG_BIN,
+    SIP_ONETIME_BIN,
     find_free_rtp_port_pair,
     find_free_udp_port,
     run_cmd,
@@ -126,13 +127,13 @@ class SipTests(unittest.TestCase):
                     proc.wait(timeout=5)
             log_fh.close()
 
-    def start_sip(self, extra_args, log_path, env=None):
+    def start_sip(self, extra_args, log_path, env=None, binary=SIP_ONETIME_BIN):
         merged_env = os.environ.copy()
         if env:
             merged_env.update(env)
         log_fh = open(log_path, "w+", encoding="utf-8")
         proc = subprocess.Popen(
-            [SIP_BIN, *extra_args],
+            [binary, *extra_args],
             stdout=log_fh,
             stderr=subprocess.STDOUT,
             env=merged_env,
@@ -142,11 +143,6 @@ class SipTests(unittest.TestCase):
         return proc
 
     def test_help_and_cli_validation(self):
-        help_res = run_cmd([SIP_BIN, "--help"])
-        self.assertEqual(help_res.returncode, 0)
-        self.assertIn(b"--encoder-arg", help_res.stderr)
-        self.assertIn(b"--speak", help_res.stderr)
-
         base = [
             "--registrar", "sip:127.0.0.1",
             "--identity", "sip:u@127.0.0.1",
@@ -165,10 +161,51 @@ class SipTests(unittest.TestCase):
             [*base, "--unknown"],
             [*base, "--port"],
         ]
-        for args in bad_cases:
-            with self.subTest(args=args):
-                res = run_cmd([SIP_BIN, *args])
-                self.assertEqual(res.returncode, 2)
+        for binary in (SIP_ONETIME_BIN, SIP_DIALOG_BIN):
+            with self.subTest(binary=binary):
+                help_res = run_cmd([binary, "--help"])
+                self.assertEqual(help_res.returncode, 0)
+                self.assertIn(b"--encoder-arg", help_res.stderr)
+                self.assertIn(b"--speak", help_res.stderr)
+                for args in bad_cases:
+                    with self.subTest(args=args):
+                        res = run_cmd([binary, *args])
+                        self.assertEqual(res.returncode, 2)
+
+    def test_dialog_keeps_call_open_and_filters_blank_response_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_dir = pathlib.Path(tmp)
+            sip_port = find_free_udp_port()
+            log_path = tmp_dir / "dialog.log"
+            rec_wav = tmp_dir / "dialog_rec.wav"
+
+            self.start_sip([
+                "--registrar", "sip:127.0.0.1:59999",
+                "--identity", "sip:dialog@127.0.0.1",
+                "--username", "dialog",
+                "--command", r"printf '\n \t\nfirst\n\t\nsecond\n'; sleep 30",
+                "--encoder", ENCODE_BIN,
+                "--baud", "1200",
+                "--port", str(sip_port),
+            ], log_path, binary=SIP_DIALOG_BIN)
+
+            started = time.monotonic()
+            pjsua_out, disconnected = run_pjsua_call(
+                f"sip:dialog@127.0.0.1:{sip_port}", rec_wav, wait_seconds=3.5
+            )
+            elapsed = time.monotonic() - started
+            self.assertTrue(disconnected, pjsua_out)
+            self.assertGreaterEqual(elapsed, 2.8, pjsua_out)
+
+            log_text = wait_for_file_text(log_path, "Call 0 disconnected.")
+            self.assertIn("Interactive command started for call 0.", log_text)
+            self.assertIn('Sending to PX: "first\\nsecond\\n"', log_text)
+            self.assertIn("Playing command response to call 0.", log_text)
+
+            dec = run_cmd([DECODE_BIN, "-v", str(rec_wav)])
+            self.assertEqual(dec.returncode, 0, dec.stderr.decode())
+            self.assertEqual(dec.stdout, b"(first\nsecond\n")
+            self.assertIn(b"Detected transmission at 1200 baud.", dec.stderr)
 
     def test_incoming_call_playback_and_hangup_roundtrip(self):
         with tempfile.TemporaryDirectory() as tmp:

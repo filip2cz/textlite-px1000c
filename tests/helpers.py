@@ -8,7 +8,13 @@ import wave
 ROOT_DIR = pathlib.Path(os.environ.get("TEXTLITE_ROOT", pathlib.Path(__file__).resolve().parent.parent))
 DECODE_BIN = os.environ.get("TEXTLITE_DECODE", str(ROOT_DIR / "decode"))
 ENCODE_BIN = os.environ.get("TEXTLITE_ENCODE", str(ROOT_DIR / "encode"))
-SIP_BIN = os.environ.get("TEXTLITE_SIP", str(ROOT_DIR / "sip"))
+SIP_ONETIME_BIN = os.environ.get(
+    "TEXTLITE_SIP_ONETIME",
+    os.environ.get("TEXTLITE_SIP", str(ROOT_DIR / "sip-onetime")),
+)
+SIP_DIALOG_BIN = os.environ.get("TEXTLITE_SIP_DIALOG", str(ROOT_DIR / "sip-dialog"))
+# Keep the old helper name available for callers that still target sip-onetime.
+SIP_BIN = SIP_ONETIME_BIN
 
 
 def run_cmd(cmd, *, input_bytes=None, env=None, timeout=30):

@@ -239,7 +239,8 @@ sync with code and configuration changes.
   encoder, one-time SIP responder, and interactive SIP responder
 - `Makefile` — local build and test targets
 - `LICENSE` — MIT license
-- `tests/` — test suite for the command-line tools
+- `tests/` — command-line, audio, and local SIP integration tests for both SIP
+  responders
 - `shell.nix` — Nix development environment
 - `pterodactyl/egg-sip.json`, `pterodactyl/start.sh` — Pterodactyl egg and startup wrapper
 - `.github/workflows/main.yml` — CI, cross-compilation, QEMU smoke tests, and draft releases

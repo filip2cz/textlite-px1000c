@@ -369,9 +369,10 @@ Test coverage map:
 - `tests/test_encode.py`: CLI validation, empty and invalid text, size limit,
   WAV structure, encoder/decoder round trips at all rates, stdin and `--`, and
   speech language/gap behavior.
-- `tests/test_sip.py`: help/validation, one-time incoming-call playback and hangup,
-  encoder option forwarding, recovery after command failure, and concurrent
-  call rejection. It uses PJSIP's `pjsua` client to place local calls.
+- `tests/test_sip.py`: help and CLI validation for both SIP programs; one-time
+  incoming-call playback, encoder option forwarding, failure recovery, and busy
+  rejection; plus dialog call persistence, response playback, and blank-line
+  filtering. It uses PJSIP's `pjsua` client to place local calls.
 - `tests/helpers.py`: environment-selected binary paths, subprocess helpers,
   WAV inspection, silence WAV generation, and free UDP/RTP port selection.
 
