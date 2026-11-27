@@ -1,6 +1,21 @@
 #!/bin/sh
 set -eu
 
+runtime_packages="$HOME/runtime-packages"
+if [ -d "$runtime_packages/usr/bin" ]; then
+    PATH="$runtime_packages/usr/bin:$runtime_packages/usr/sbin:$runtime_packages/usr/games:$PATH"
+    export PATH
+fi
+if [ -d "$runtime_packages/usr/lib" ] || [ -d "$runtime_packages/lib" ]; then
+    LD_LIBRARY_PATH="$runtime_packages/lib:$runtime_packages/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    export LD_LIBRARY_PATH
+fi
+if [ -d "$runtime_packages/usr/share" ]; then
+    current_xdg_data_dirs="${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+    XDG_DATA_DIRS="$runtime_packages/usr/share:$current_xdg_data_dirs"
+    export XDG_DATA_DIRS
+fi
+
 public_address="${SIP_PUBLIC_ADDRESS:-${SERVER_IP:-}}"
 espeak_runtime="$HOME/espeak-runtime"
 if [ -x "$espeak_runtime/usr/bin/espeak-ng" ]; then
@@ -35,4 +50,4 @@ if [ -n "${SIP_GAP:-}" ]; then
     set -- "$@" --gap "$SIP_GAP"
 fi
 
-exec ./sip "$@"
+exec ./sip-onetime "$@"

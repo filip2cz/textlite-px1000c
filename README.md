@@ -35,10 +35,10 @@ requirements.
 | `sip-onetime` | The `encode` executable and `/bin/sh` for the one-time command. A dynamically linked build also needs PJSIP shared libraries. |
 | `sip-dialog` | The `encode` executable and `/bin/sh` for the interactive command. It decodes received PCM in process, so it does not need FFmpeg. A dynamically linked build also needs PJSIP and pseudo-terminal runtime libraries. |
 
-The Pterodactyl egg installs the one-time `sip` compatibility target and
-`encode` as static musl binaries, so that deployment does not need PJSIP shared
-libraries. It bundles eSpeak NG for the optional speech feature. Neither
-`decode` nor `sip-dialog` is part of the egg.
+The Pterodactyl eggs install either `sip-onetime` or `sip-dialog` together with
+`encode` as static musl binaries, so deployment does not need PJSIP shared
+libraries. Each egg bundles eSpeak NG for the optional speech feature. The
+`decode` CLI is not installed; `sip-dialog` decodes caller audio in process.
 
 ### Compilation
 
@@ -135,7 +135,8 @@ wrote: ...`; line endings appear as `\n`. The dialog responder removes one
 leading `(`, the default PX margin byte, before passing caller text to the
 interactive command.
 
-Before a command response is sent to the PX device, CR/CRLF line endings are
+Before a command response is sent to the PX device, ANSI terminal escape
+sequences and unsupported control bytes are removed. CR/CRLF line endings are
 normalized and all blank lines are removed, including lines containing only
 spaces or tabs. Indentation on nonblank lines is preserved. The normalized
 response is printed as `Sending to PX: ...` and is also the version replayed by
@@ -197,11 +198,12 @@ FSK tones are preserved. Stop either responder with Ctrl+C.
 
 ### Pterodactyl deployment
 
-Import [the SIP egg](pterodactyl/egg-sip.json) from Admin → Eggs → Import Egg.
-The installer clones the configured repository and branch, builds PJSIP 2.16
-and statically links the one-time `sip` target and `encode` with musl. It also
-bundles eSpeak NG, its libraries, and voice data, so speech works without
-eSpeak NG in the runtime image.
+Import the [one-time responder egg](pterodactyl/egg-sip-onetime.json) and/or
+the [interactive dialog egg](pterodactyl/egg-sip-dialog.json) from Admin → Eggs
+→ Import Egg. Each installer clones the configured repository and branch,
+builds PJSIP 2.16, and statically links its responder and `encode` with musl.
+It also bundles eSpeak NG, its libraries, and voice data, so speech works
+without eSpeak NG in the runtime image.
 
 Allocate a UDP port for SIP and set it as the server's primary allocation.
 Also allocate the configured RTP port and the following port for RTCP. The
@@ -211,10 +213,22 @@ wrapper advertises Pterodactyl's `SERVER_IP`; if it is behind another NAT, set
 the egg's Public IPv4 Address to the externally reachable address.
 
 Set the registrar, account identity, authentication username, password, and
-message command in the egg's Startup settings. The command's standard output
-becomes the transmitted message. The password is passed through
-`SIP_PASSWORD`. Enable Speak Message in Startup to have eSpeak NG read the
-message before its modem transmission.
+command in the selected egg's Startup settings. In the one-time egg, the shell
+command runs for each call and its standard output becomes the transmitted
+message. In the dialog egg, the command starts once per call and stays alive;
+caller messages are written to its standard input and its output is sent back
+over the call. The command must be available to the responder; the Additional
+Alpine Packages field can provide commands such as `adventure`. The password is
+passed through `SIP_PASSWORD`. Enable Speak Message in Startup to have eSpeak
+NG read outgoing text before its modem transmission.
+
+Both eggs also provide an **Additional Alpine Packages** field. Enter
+space-separated package names there, such as `bsd-games` for the `adventure`
+command, then reinstall the server so the packages are bundled under
+`/home/container/runtime-packages`. The startup wrapper adds their executable
+and library directories to `PATH` and `LD_LIBRARY_PATH` for the responder and
+its command. Packages are private to this server directory; packages that need
+system-wide files or services require a custom runtime image.
 
 ## Development
 
@@ -242,9 +256,12 @@ sync with code and configuration changes.
 - `tests/` — command-line, audio, and local SIP integration tests for both SIP
   responders
 - `shell.nix` — Nix development environment
-- `pterodactyl/egg-sip.json`, `pterodactyl/start.sh` — Pterodactyl egg and startup wrapper
+- `pterodactyl/egg-sip-onetime.json`, `pterodactyl/egg-sip-dialog.json` —
+  Pterodactyl eggs for the one-time and interactive responders
+- `pterodactyl/start-onetime.sh`, `pterodactyl/start-dialog.sh` — maintained
+  startup templates embedded by their respective egg installers
 - `.github/workflows/main.yml` — CI, cross-compilation, QEMU smoke tests, and draft releases
-- `.github/scripts/build_pjsip.sh` — static PJSIP build helper used by CI and the egg
+- `.github/scripts/build_pjsip.sh` — static PJSIP build helper used by CI and both eggs
 - `test_abc123-*.mp3` — sample recordings carrying `test abc123` at different speeds
 - `AGENTS.md` — agent instructions and map of the implementation in each source file
 

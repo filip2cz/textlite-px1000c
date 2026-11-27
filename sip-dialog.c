@@ -251,8 +251,93 @@ static void remove_blank_lines(unsigned char *text, size_t *length)
     *length = written;
 }
 
+static size_t skip_ansi_string(const unsigned char *text, size_t length,
+                               size_t read)
+{
+    while (read < length) {
+        if (text[read] == '\a' || text[read] == 0x9c)
+            return read + 1;
+        if (text[read] == 0x1b && read + 1 < length && text[read + 1] == '\\')
+            return read + 2;
+        ++read;
+    }
+    return length;
+}
+
+static size_t skip_ansi_sequence(const unsigned char *text, size_t length,
+                                 size_t read)
+{
+    if (read + 1 >= length)
+        return length;
+
+    unsigned char introducer = text[read + 1];
+    if (introducer == '[') {
+        read += 2;
+        while (read < length) {
+            unsigned char value = text[read++];
+            if (value >= 0x40 && value <= 0x7e)
+                break;
+        }
+        return read;
+    }
+    if (introducer == ']' || introducer == 'P' || introducer == 'X' ||
+        introducer == '^' || introducer == '_')
+        return skip_ansi_string(text, length, read + 2);
+
+    /* Skip a general ESC sequence, including intermediate bytes such as ESC ( B. */
+    ++read;
+    while (read < length && text[read] >= 0x20 && text[read] <= 0x2f)
+        ++read;
+    if (read < length && text[read] >= 0x30 && text[read] <= 0x7e)
+        ++read;
+    return read;
+}
+
+static size_t skip_c1_sequence(const unsigned char *text, size_t length,
+                              size_t read)
+{
+    unsigned char introducer = text[read];
+    if (introducer == 0x9b) {
+        ++read;
+        while (read < length) {
+            unsigned char value = text[read++];
+            if (value >= 0x40 && value <= 0x7e)
+                break;
+        }
+        return read;
+    }
+    if (introducer == 0x90 || introducer == 0x98 || introducer == 0x9d ||
+        introducer == 0x9e || introducer == 0x9f)
+        return skip_ansi_string(text, length, read + 1);
+    return read + 1;
+}
+
+static void strip_terminal_control_sequences(unsigned char *text,
+                                             size_t *length)
+{
+    size_t read = 0;
+    size_t written = 0;
+    while (read < *length) {
+        unsigned char value = text[read];
+        if (value == 0x1b) {
+            read = skip_ansi_sequence(text, *length, read);
+            continue;
+        }
+        if (value >= 0x80 && value <= 0x9f) {
+            read = skip_c1_sequence(text, *length, read);
+            continue;
+        }
+        ++read;
+        if (value == '\t' || value == '\r' || value == '\n' ||
+            (value >= 0x20 && value <= 0x7e) || value >= 0xa0)
+            text[written++] = value;
+    }
+    *length = written;
+}
+
 static void normalize_command_output(unsigned char *text, size_t *length)
 {
+    strip_terminal_control_sequences(text, length);
     size_t written = 0;
     for (size_t read = 0; read < *length; ++read) {
         if (text[read] == '\r') {
@@ -895,7 +980,7 @@ static void *call_worker(void *argument)
         if (command_text_length != 0) {
             normalize_command_output(command_text, &command_text_length);
             if (command_text_length == 0) {
-                fprintf(stderr, "Command output contained only blank lines.\n");
+                fprintf(stderr, "Command output contained no printable text.\n");
                 free(command_text);
                 command_text = NULL;
             }

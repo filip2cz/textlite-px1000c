@@ -50,10 +50,14 @@ Other files:
 - `.github/workflows/main.yml`: tests, cross-compilation, QEMU smoke checks,
   and draft releases.
 - `.github/scripts/build_pjsip.sh`: builds the reduced static PJSIP used by CI
-  and the Pterodactyl installer.
-- `pterodactyl/egg-sip.json`: importable Pterodactyl egg and install script.
-- `pterodactyl/start.sh`: source template for the egg's argument-safe launcher;
-  the installer embeds a corresponding launcher in the server directory.
+  and both Pterodactyl egg installers.
+- `pterodactyl/egg-sip-onetime.json` and `egg-sip-dialog.json`: importable
+  Pterodactyl eggs and install scripts for the one-time and interactive
+  responders.
+- `pterodactyl/start-onetime.sh` and `start-dialog.sh`: source templates for
+  their eggs' argument-safe launchers; each installer embeds its matching
+  launcher in the server directory. They also expose optional bundled Alpine
+  packages to the responder command.
 - `test_abc123-{300,600,1200}Bd.mp3`: sample recordings containing the text
   `test abc123` at the indicated baud rate.
 - `README.md`: user guide and command examples. Its Dependencies section
@@ -301,9 +305,10 @@ codec, worker, and encoder options with `sip-onetime.c`. `--command` remains a
 shell command and is started once per accepted call with stdin and stdout
 connected to a pseudo-terminal with input echo disabled. Its stdout is
 collected until 500 ms of inactivity (up to 7,400 bytes). Before encoding,
-CR/CRLF endings are normalized and all blank lines, including whitespace-only
-lines, are removed. Indentation on nonblank lines remains. The normalized
-output is cached for `?repeat`. The command remains running after
+ANSI escape sequences and unsupported terminal control bytes are removed,
+CR/CRLF endings are normalized, and all blank lines, including
+whitespace-only lines, are removed. Indentation on nonblank lines remains.
+The normalized output is cached for `?repeat`. The command remains running after
 playback so later caller messages can be sent to its stdin. A call ends when
 the caller hangs up, the command exits, or an operation fails.
 
@@ -351,9 +356,8 @@ PX: ...` after output trimming and line-ending normalization.
   only for `--speak`; both SIP programs require `encode` and `/bin/sh` for the
   configured command. `sip-dialog` performs PCM decoding in process and does
   not invoke FFmpeg. Dynamically linked SIP programs also require their PJSIP
-  shared libraries. The Pterodactyl `sip` alias and `encode` binaries are
-  statically linked with musl; the egg separately bundles eSpeak NG for its
-  optional speech path.
+  shared libraries. Each Pterodactyl egg statically links its SIP responder
+  and `encode` with musl and bundles eSpeak NG for the optional speech path.
 - `make test` depends on Bash, Python 3, PJSIP plus `pkg-config`, the
   pseudo-terminal development library, FFmpeg, eSpeak NG, and the `pjsua`
   command-line client. It first builds configured
@@ -397,23 +401,28 @@ target matrix changes.
 
 ## Pterodactyl packaging
 
-`pterodactyl/egg-sip.json` is the PTDL_v2 export. Its installer:
+`pterodactyl/egg-sip-onetime.json` and `pterodactyl/egg-sip-dialog.json` are
+PTDL_v2 exports. Their installers:
 
 1. Installs Alpine build tools and downloads eSpeak NG plus musl into a private
-   server-directory root.
+   server-directory root. When `SIP_PACKAGES` is set, it also bundles those APK
+   packages below `/mnt/server/runtime-packages`.
 2. Clones the configured source repository and branch, downloads PJSIP 2.16,
    and uses `.github/scripts/build_pjsip.sh` to build the minimal static libs.
-3. Statically links the `sip` compatibility target (the one-time responder)
-   and `encode`, installs them, embeds a startup script,
-   and installs an eSpeak wrapper that invokes the bundled musl loader.
+3. Statically links the matching `sip-onetime` or `sip-dialog` responder and
+   `encode`, installs them, embeds the matching startup script, and installs an
+   eSpeak wrapper that invokes the bundled musl loader.
 
-The startup script sources/configures `SERVER_PORT` for SIP, the configured
+Each startup script sources/configures `SERVER_PORT` for SIP, the configured
 RTP port, bind target, baud, and optional encoder settings; it reads the SIP
-password from `SIP_PASSWORD`. It advertises `SIP_PUBLIC_ADDRESS` if supplied,
-otherwise `SERVER_IP`. The allocation must include the SIP UDP port and both
-the RTP port and its following RTCP port. The default RTP port is 40000.
-`pterodactyl/start.sh` is the maintained source template for the wrapper
-embedded in the egg install script; keep both copies in sync.
+password from `SIP_PASSWORD`. It adds bundled package binary and library paths
+to `PATH` and `LD_LIBRARY_PATH` before starting the responder. It advertises
+`SIP_PUBLIC_ADDRESS` if supplied, otherwise `SERVER_IP`. The allocation must
+include the SIP UDP port and both the RTP port and its following RTCP port.
+The default RTP port is 40000.
+`pterodactyl/start-onetime.sh` and `pterodactyl/start-dialog.sh` are the
+maintained source templates for the launchers embedded by their respective
+egg install scripts; keep each embedded copy in sync with its template.
 
 The egg metadata uses a JSON-encoded startup-detection string, email-formatted
 author, and text field types. Egg variables are documented in the JSON; when
