@@ -1,6 +1,9 @@
 /decode
 /encode
 /sip
+/sip-onetime
+/sip-dialog
 /message*
+/encoded.wav
 __pycache__
 /start.sh

@@ -22,20 +22,27 @@ behavior.
 
 ## Project map
 
-This repository contains three POSIX C command-line programs:
+This repository contains four POSIX C command-line programs:
 
 - `decode.c`: FFmpeg-backed audio normalization, FSK demodulation, serial-frame
-  search, and decoded text output.
+  search, and decoded text output. Its in-process PCM entry point is declared
+  in `decode.h` and is used by `sip-dialog.c`.
 - `encode.c`: text normalization, optional eSpeak NG speech capture, FSK sample
   generation, and RIFF/WAV output.
-- `sip.c`: PJSIP SIP registration and call handling; runs a configured shell
-  command, gives its output to `encode`, and plays the WAV into an incoming
-  call.
+- `sip-onetime.c`: PJSIP registration and call handling; runs a configured
+  shell command once, gives its output to `encode`, and plays the WAV into an
+  incoming call.
+- `sip-dialog.c`: PJSIP registration and call handling; keeps a configured
+  interactive shell command alive for the call, decodes caller messages, feeds
+  them to the command, and plays its output back into the call.
 
 Other files:
 
-- `Makefile`: builds `decode` and `encode`, conditionally adds `sip` when
-  `pkg-config` can find `libpjproject`, and exposes the `test` target.
+- `decode.h`: in-process PCM decoder interface shared by `decode.c` and
+  `sip-dialog.c`.
+- `Makefile`: builds `decode` and `encode`, conditionally adds
+  `sip-onetime` and `sip-dialog` when `pkg-config` can find `libpjproject`,
+  retains `sip` as an alias for the one-time responder, and exposes `test`.
 - `shell.nix`: Nix development environment with the C compiler, FFmpeg,
   eSpeak NG, PJSIP, pkg-config, OpenSSL, and ALSA libraries.
 - `tests/run_tests.sh`, `tests/helpers.py`, and `tests/test_*.py`: temporary
@@ -203,7 +210,7 @@ count, emitted PCM byte count, FSK phase, baud, and sample remainder.
   buffering, child synthesis, and parse failures are reported to stderr and
   return failure.
 
-## `sip.c`: SIP responder
+## `sip-onetime.c`: one-time SIP responder
 
 ### Configuration and network setup
 
@@ -285,20 +292,71 @@ FSK tones better than speech vocoders. The reduced static PJSIP build also
 disables unsupported vocoders and multimedia features, retaining the audio
 components needed by this responder.
 
+## `sip-dialog.c`: interactive SIP responder
+
+### Call and command lifecycle
+
+The dialog responder shares the SIP configuration, registration, account,
+codec, worker, and encoder options with `sip-onetime.c`. `--command` remains a
+shell command and is started once per accepted call with stdin and stdout
+connected to a pseudo-terminal with input echo disabled. Its stdout is
+collected until 500 ms of inactivity (up to 7,400 bytes). Before encoding,
+CR/CRLF endings are normalized and all blank lines, including whitespace-only
+lines, are removed. Indentation on nonblank lines remains. The normalized
+output is cached for `?repeat`. The command remains running after
+playback so later caller messages can be sent to its stdin. A call ends when
+the caller hangs up, the command exits, or an operation fails.
+
+An incoming message that contains only `?repeat` after trimming ASCII spaces,
+tabs, and line endings is handled by the responder. It replays the most recent
+command output that was sent, without writing the request to the command. If no
+response has been sent yet, the request is ignored.
+Every successfully decoded caller message is printed in escaped one-line form
+to standard error before the responder handles it. `sip-dialog` removes one
+leading `(` from the decoded text because it is the default margin byte (40),
+not message content. Command responses are logged separately as `Sending to
+PX: ...` after output trimming and line-ending normalization.
+
+### Receive audio and message boundaries
+
+- The media bridge is configured at 22,050 Hz. A custom conference sink
+  receives mono signed 16-bit PCM resampled to that rate; its callback only
+  collects samples and signals the worker.
+- Capture starts after each outgoing response. Leading silence is discarded;
+  a frame must exceed 220 RMS and show at least 0.08 normalized energy at the
+  1300/1700 Hz tones to begin or continue a message. At least 250 ms of tone
+  activity and then 600 ms without it closes the message. The sample buffer is
+  capped at 16 Mi samples.
+- `decode_pcm_samples` in `decode.c` runs the same 300/600/1200 baud, 7E2
+  decoder used by the file CLI, without FFmpeg. Decoded text is written to the
+  command's stdin. When the command produces output, the worker encodes and
+  plays it, then waits for the next caller message.
+- The worker owns the command pseudo-terminal, receive buffers, and temporary
+  WAVs. The process keeps one custom conference sink and its pool alive across
+  calls; its `on_destroy` handler releases the pool. Each worker connects and
+  disconnects it for its active call. PJSUA callbacks only publish media and
+  call state changes under `state_mutex`.
+
 ## Build, dependencies, and tests
 
-- `make all` builds `decode` and `encode`; it adds `sip` only when
-  `pkg-config --static --libs libpjproject` returns flags. Default C flags are
+- `make all` builds `decode` and `encode`; it adds `sip-onetime` and
+  `sip-dialog` when `pkg-config --static --libs libpjproject` returns flags.
+  The `sip` target remains an alias for `sip-onetime`. Default C flags are
   C11, optimization, common warnings, and `-Werror`.
-- `decode` and `encode` link `libm`. `sip` links PJSIP's pkg-config flags and
-  POSIX threads. The Nix shell supplies the project development dependencies.
-- Runtime programs: `decode` invokes `ffmpeg`; `encode` invokes
-  `espeak-ng` only for `--speak`; `sip` requires its encoder and `/bin/sh` for
-  the text command. A dynamically linked `sip` also requires its PJSIP shared
-  libraries. The Pterodactyl `sip` and `encode` binaries are statically linked
-  with musl; the egg separately bundles eSpeak NG for its optional speech path.
-- `make test` depends on Bash, Python 3, PJSIP plus `pkg-config`, FFmpeg,
-  eSpeak NG, and the `pjsua` command-line client. It first builds configured
+- `decode` and `encode` link `libm`. Both SIP programs link PJSIP's pkg-config
+  flags and POSIX threads; `sip-dialog` also links the in-process decoder,
+  `libm`, and the pseudo-terminal library. The Nix shell supplies the project
+  development dependencies.
+- Runtime programs: `decode` invokes `ffmpeg`; `encode` invokes `espeak-ng`
+  only for `--speak`; both SIP programs require `encode` and `/bin/sh` for the
+  configured command. `sip-dialog` performs PCM decoding in process and does
+  not invoke FFmpeg. Dynamically linked SIP programs also require their PJSIP
+  shared libraries. The Pterodactyl `sip` alias and `encode` binaries are
+  statically linked with musl; the egg separately bundles eSpeak NG for its
+  optional speech path.
+- `make test` depends on Bash, Python 3, PJSIP plus `pkg-config`, the
+  pseudo-terminal development library, FFmpeg, eSpeak NG, and the `pjsua`
+  command-line client. It first builds configured
   targets, then `tests/run_tests.sh` builds fresh binaries in a temporary
   directory, exports their paths to the test process, and runs unittest
   discovery. Keep test dependencies distinct from normal runtime requirements.
@@ -311,7 +369,7 @@ Test coverage map:
 - `tests/test_encode.py`: CLI validation, empty and invalid text, size limit,
   WAV structure, encoder/decoder round trips at all rates, stdin and `--`, and
   speech language/gap behavior.
-- `tests/test_sip.py`: help/validation, incoming-call playback and hangup,
+- `tests/test_sip.py`: help/validation, one-time incoming-call playback and hangup,
   encoder option forwarding, recovery after command failure, and concurrent
   call rejection. It uses PJSIP's `pjsua` client to place local calls.
 - `tests/helpers.py`: environment-selected binary paths, subprocess helpers,
@@ -320,7 +378,8 @@ Test coverage map:
 ## CI and cross-build helper
 
 `.github/workflows/main.yml` runs the test suite in `nix-shell` first. Once
-tests pass, architecture jobs build `decode`, `encode`, and static `sip` for
+tests pass, architecture jobs build `decode`, `encode`, `sip-onetime`, and
+`sip-dialog` for
 x86_64, x86, AArch64, ARMv7, ARMv5, and RISC-V 64-bit using target toolchains
 and PJSIP 2.16. Artifacts feed a QEMU smoke-check job that runs each binary's
 help path and checks RISC-V ELF metadata. A push to `main` creates a draft
@@ -343,7 +402,8 @@ target matrix changes.
    server-directory root.
 2. Clones the configured source repository and branch, downloads PJSIP 2.16,
    and uses `.github/scripts/build_pjsip.sh` to build the minimal static libs.
-3. Statically links `sip` and `encode`, installs them, embeds a startup script,
+3. Statically links the `sip` compatibility target (the one-time responder)
+   and `encode`, installs them, embeds a startup script,
    and installs an eSpeak wrapper that invokes the bundled musl loader.
 
 The startup script sources/configures `SERVER_PORT` for SIP, the configured

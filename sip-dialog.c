@@ -1,0 +1,1605 @@
+/* Keep an interactive text command connected to both sides of a SIP PX call. */
+#define _DEFAULT_SOURCE
+#define _POSIX_C_SOURCE 200809L
+
+#include <errno.h>
+#include <arpa/inet.h>
+#include <poll.h>
+#include <pty.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <math.h>
+#include <pjmedia/wav_port.h>
+#include <pjsua-lib/pjsua.h>
+#include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <termios.h>
+#include <unistd.h>
+
+#include "decode.h"
+
+/* PJSUA callbacks publish call/media events; the worker owns command execution,
+   encoding, playback, and cleanup so slow work never blocks SIP callbacks. */
+
+enum {
+    MAX_COMMAND_OUTPUT = 7400,
+    DEFAULT_SIP_PORT = 0,
+    MEDIA_WAIT_SECONDS = 30,
+    PLAYBACK_TIMEOUT_MARGIN_SECONDS = 30,
+    MAX_ENCODER_ARGS = 64
+};
+
+enum {
+    RX_SAMPLE_RATE = 22050,
+    RX_FRAME_SAMPLES = RX_SAMPLE_RATE / 50,
+    RX_MAX_SAMPLES = 16 * 1024 * 1024,
+    RX_END_SILENCE_SAMPLES = RX_SAMPLE_RATE * 3 / 5,
+    RX_MIN_SIGNAL_SAMPLES = RX_SAMPLE_RATE / 4,
+    COMMAND_OUTPUT_IDLE_MS = 500
+};
+
+typedef struct {
+    const char *registrar;
+    const char *identity;
+    const char *username;
+    const char *password;
+    const char *command;
+    const char *encoder;
+    unsigned baud_rate;
+    int margin_set;
+    unsigned margin;
+    int speak;
+    const char *speech_language;
+    const char *gap_seconds;
+    const char *extra_encoder_args[MAX_ENCODER_ARGS];
+    size_t extra_encoder_arg_count;
+    unsigned local_port;
+    unsigned rtp_port;
+    const char *bind_target;
+    const char *public_address;
+} AppConfig;
+
+typedef struct {
+    const AppConfig *config;
+    pjsua_call_id call_id;
+} WorkerArgs;
+
+extern char **environ;
+
+static pthread_mutex_t state_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t state_changed = PTHREAD_COND_INITIALIZER;
+static const AppConfig *app_config;
+static pjsua_call_id active_call = -1;
+static pjsua_conf_port_id active_audio_slot = -1;
+static pjsua_player_id active_player_id = -1;
+static int call_is_active;
+static int media_is_ready;
+static int playback_is_finished;
+static int worker_is_joinable;
+static int worker_is_finished = 1;
+static pthread_t worker_thread;
+static pid_t command_process_group = -1;
+static volatile sig_atomic_t stop_requested;
+static int command_terminal = -1;
+static int16_t *receive_samples;
+static size_t receive_sample_count;
+static size_t receive_silence_samples;
+static size_t receive_signal_samples;
+static int receive_enabled;
+static int receive_saw_signal;
+static int receive_ready;
+static int receive_overflow;
+static pj_pool_t *receive_pool;
+static pjmedia_port *receive_port;
+static pjsua_conf_port_id receive_slot = -1;
+static pid_t interactive_command_pid = -1;
+static double receive_cosine[2][RX_FRAME_SAMPLES];
+static double receive_sine[2][RX_FRAME_SAMPLES];
+
+/* Shared call, media, player, and worker state is read or written under
+   state_mutex. Waiters release it through state_changed while they sleep. */
+
+static void print_pj_error(const char *operation, pj_status_t status)
+{
+    char message[PJ_ERR_MSG_SIZE];
+    pj_strerror(status, message, sizeof(message));
+    fprintf(stderr, "%s failed: %s\n", operation, message);
+}
+
+static void request_stop(int signal_number)
+{
+    (void)signal_number;
+    stop_requested = 1;
+}
+
+static int call_is_current_and_active(pjsua_call_id call_id)
+{
+    int result;
+    pthread_mutex_lock(&state_mutex);
+    result = !stop_requested && call_is_active && active_call == call_id;
+    pthread_mutex_unlock(&state_mutex);
+    return result;
+}
+
+static void mark_call_inactive(pjsua_call_id call_id)
+{
+    pthread_mutex_lock(&state_mutex);
+    if (active_call == call_id) {
+        call_is_active = 0;
+        media_is_ready = 0;
+        active_call = -1;
+        active_audio_slot = -1;
+        pthread_cond_broadcast(&state_changed);
+    }
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static void hangup_if_active(pjsua_call_id call_id)
+{
+    if (call_is_current_and_active(call_id)) {
+        pj_status_t status = pjsua_call_hangup(call_id, 0, NULL, NULL);
+        if (status != PJ_SUCCESS)
+            print_pj_error("Could not hang up the call", status);
+        mark_call_inactive(call_id);
+    }
+}
+
+static int wait_for_child(pid_t child, int *status_out)
+{
+    pid_t result;
+    do {
+        result = waitpid(child, status_out, 0);
+    } while (result < 0 && errno == EINTR);
+    if (result < 0) {
+        perror("waitpid");
+        return -1;
+    }
+    return 0;
+}
+
+static void stop_command_group(pid_t child)
+{
+    if (kill(-child, SIGTERM) != 0)
+        kill(child, SIGTERM);
+}
+
+static void remember_command_group(pid_t child)
+{
+    pthread_mutex_lock(&state_mutex);
+    command_process_group = child;
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static void forget_command_group(pid_t child)
+{
+    pthread_mutex_lock(&state_mutex);
+    if (command_process_group == child)
+        command_process_group = -1;
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static void on_player_eof(pjmedia_port *port, void *user_data);
+static int wait_for_playback_finish(pjsua_call_id call_id,
+                                    unsigned timeout_seconds);
+
+static int write_all(int descriptor, const unsigned char *data, size_t length)
+{
+    size_t written = 0;
+    while (written < length) {
+        ssize_t count = write(descriptor, data + written, length - written);
+        if (count < 0) {
+            if (errno == EINTR)
+                continue;
+            return -1;
+        }
+        written += (size_t)count;
+    }
+    return 0;
+}
+
+static int is_repeat_request(const unsigned char *message, size_t length)
+{
+    while (length != 0 && (message[0] == ' ' || message[0] == '\t' ||
+                           message[0] == '\r' || message[0] == '\n')) {
+        ++message;
+        --length;
+    }
+    while (length != 0 && (message[length - 1] == ' ' ||
+                           message[length - 1] == '\t' ||
+                           message[length - 1] == '\r' ||
+                           message[length - 1] == '\n'))
+        --length;
+    return length == 7 && memcmp(message, "?repeat", 7) == 0;
+}
+
+static void remove_blank_lines(unsigned char *text, size_t *length)
+{
+    size_t read = 0;
+    size_t written = 0;
+    while (read < *length) {
+        size_t line_start = read;
+        while (read < *length && text[read] != '\n')
+            ++read;
+        size_t line_end = read;
+        int blank = 1;
+        for (size_t i = line_start; i < line_end; ++i) {
+            if (text[i] != ' ' && text[i] != '\t') {
+                blank = 0;
+                break;
+            }
+        }
+        if (!blank) {
+            size_t line_length = line_end - line_start;
+            memmove(text + written, text + line_start, line_length);
+            written += line_length;
+            if (read < *length)
+                text[written++] = '\n';
+        }
+        if (read < *length)
+            ++read;
+    }
+    *length = written;
+}
+
+static void normalize_command_output(unsigned char *text, size_t *length)
+{
+    size_t written = 0;
+    for (size_t read = 0; read < *length; ++read) {
+        if (text[read] == '\r') {
+            text[written++] = '\n';
+            if (read + 1 < *length && text[read + 1] == '\n')
+                ++read;
+        } else {
+            text[written++] = text[read];
+        }
+    }
+    *length = written;
+    remove_blank_lines(text, length);
+}
+
+static void print_escaped_text(const char *label,
+                               const unsigned char *message, size_t length)
+{
+    fprintf(stderr, "%s: \"", label);
+    for (size_t i = 0; i < length; ++i) {
+        switch (message[i]) {
+        case '\n':
+            fputs("\\n", stderr);
+            break;
+        case '\r':
+            fputs("\\r", stderr);
+            break;
+        case '\t':
+            fputs("\\t", stderr);
+            break;
+        case '\\':
+            fputs("\\\\", stderr);
+            break;
+        case '"':
+            fputs("\\\"", stderr);
+            break;
+        default:
+            if (message[i] >= 32 && message[i] <= 126)
+                fputc(message[i], stderr);
+            else
+                fprintf(stderr, "\\x%02x", (unsigned)message[i]);
+            break;
+        }
+    }
+    fputs("\"\n", stderr);
+}
+
+static int run_encoder(const AppConfig *config, const char *wav_path,
+                       const unsigned char *text, size_t text_length)
+{
+    int pipefd[2];
+    if (pipe(pipefd) != 0) {
+        perror("pipe");
+        return -1;
+    }
+
+    posix_spawn_file_actions_t actions;
+    int error = posix_spawn_file_actions_init(&actions);
+    int actions_ready = error == 0;
+    if (error == 0)
+        error = posix_spawn_file_actions_adddup2(&actions, pipefd[0], STDIN_FILENO);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, pipefd[0]);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, pipefd[1]);
+    if (error != 0) {
+        fprintf(stderr, "Could not prepare the encoder process: %s\n", strerror(error));
+        if (actions_ready)
+            posix_spawn_file_actions_destroy(&actions);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    /* Supply text on stdin and build argv directly so option values never
+       pass through another shell. */
+    char baud_text[16];
+    char margin_text[16];
+    snprintf(baud_text, sizeof(baud_text), "%u", config->baud_rate);
+
+    char *arguments[16 + MAX_ENCODER_ARGS];
+    size_t argc = 0;
+    arguments[argc++] = (char *)config->encoder;
+    arguments[argc++] = "-o";
+    arguments[argc++] = (char *)wav_path;
+    arguments[argc++] = "-b";
+    arguments[argc++] = baud_text;
+    if (config->margin_set) {
+        snprintf(margin_text, sizeof(margin_text), "%u", config->margin);
+        arguments[argc++] = "-m";
+        arguments[argc++] = margin_text;
+    }
+    if (config->speak)
+        arguments[argc++] = "-s";
+    if (config->speech_language != NULL) {
+        arguments[argc++] = "-l";
+        arguments[argc++] = (char *)config->speech_language;
+    }
+    if (config->gap_seconds != NULL) {
+        arguments[argc++] = "-g";
+        arguments[argc++] = (char *)config->gap_seconds;
+    }
+    for (size_t i = 0; i < config->extra_encoder_arg_count; ++i)
+        arguments[argc++] = (char *)config->extra_encoder_args[i];
+    arguments[argc] = NULL;
+
+    pid_t child = -1;
+    error = posix_spawnp(&child, config->encoder, &actions, NULL,
+                         arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (error != 0) {
+        fprintf(stderr, "Could not start encoder '%s': %s\n",
+                config->encoder, strerror(error));
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    close(pipefd[0]);
+    int write_failed = write_all(pipefd[1], text, text_length) != 0;
+    if (write_failed)
+        perror("write encoder input");
+    close(pipefd[1]);
+
+    int child_status = 0;
+    if (wait_for_child(child, &child_status) != 0)
+        return -1;
+    if (write_failed || !WIFEXITED(child_status) || WEXITSTATUS(child_status) != 0) {
+        fprintf(stderr, "Encoder failed to create the call audio.\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int spawn_interactive_command(const char *command)
+{
+    int master = -1;
+    int slave = -1;
+    struct winsize terminal_size = {.ws_row = 24, .ws_col = 80};
+    if (openpty(&master, &slave, NULL, NULL, &terminal_size) != 0) {
+        perror("openpty interactive command");
+        return -1;
+    }
+    struct termios settings;
+    if (tcgetattr(slave, &settings) != 0) {
+        perror("tcgetattr interactive command");
+        close(master);
+        close(slave);
+        return -1;
+    }
+    settings.c_lflag &= (tcflag_t)~(ECHO | ECHONL | ICANON);
+    settings.c_oflag &= (tcflag_t)~ONLCR;
+    settings.c_cc[VMIN] = 1;
+    settings.c_cc[VTIME] = 0;
+    if (tcsetattr(slave, TCSANOW, &settings) != 0) {
+        perror("tcsetattr interactive command");
+        close(master);
+        close(slave);
+        return -1;
+    }
+
+    posix_spawn_file_actions_t actions;
+    posix_spawnattr_t attributes;
+    int actions_ready = 0;
+    int attributes_ready = 0;
+    int error = posix_spawn_file_actions_init(&actions);
+    if (error == 0) {
+        actions_ready = 1;
+        error = posix_spawn_file_actions_adddup2(&actions, slave, STDIN_FILENO);
+    }
+    if (error == 0)
+        error = posix_spawn_file_actions_adddup2(&actions, slave, STDOUT_FILENO);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, master);
+    if (error == 0)
+        error = posix_spawn_file_actions_addclose(&actions, slave);
+    if (error == 0) {
+        error = posix_spawnattr_init(&attributes);
+        if (error == 0)
+            attributes_ready = 1;
+    }
+    if (error == 0)
+        error = posix_spawnattr_setpgroup(&attributes, 0);
+    if (error == 0)
+        error = posix_spawnattr_setflags(&attributes, POSIX_SPAWN_SETPGROUP);
+
+    pid_t child = -1;
+    if (error == 0) {
+        char *arguments[] = {"sh", "-c", (char *)command, NULL};
+        error = posix_spawn(&child, "/bin/sh", &actions, &attributes,
+                            arguments, environ);
+    }
+    if (attributes_ready)
+        posix_spawnattr_destroy(&attributes);
+    if (actions_ready)
+        posix_spawn_file_actions_destroy(&actions);
+    if (error != 0) {
+        fprintf(stderr, "Could not start the interactive text command: %s\n",
+                strerror(error));
+        close(master);
+        close(slave);
+        return -1;
+    }
+
+    close(slave);
+    command_terminal = master;
+    interactive_command_pid = child;
+    remember_command_group(child);
+    return 0;
+}
+
+static int collect_command_output(unsigned char **text_out, size_t *length_out)
+{
+    unsigned char *buffer = malloc(MAX_COMMAND_OUTPUT + 1U);
+    if (buffer == NULL) {
+        perror("malloc command output");
+        return -1;
+    }
+    size_t used = 0;
+    int idle_ms = COMMAND_OUTPUT_IDLE_MS;
+    for (;;) {
+        struct pollfd descriptor = { .fd = command_terminal, .events = POLLIN };
+        int ready = poll(&descriptor, 1, idle_ms);
+        if (ready == 0)
+            break;
+        if (ready < 0) {
+            if (errno == EINTR)
+                continue;
+            perror("poll command output");
+            free(buffer);
+            return -1;
+        }
+        if (descriptor.revents & (POLLIN | POLLHUP)) {
+            ssize_t count = read(command_terminal, buffer + used,
+                                 MAX_COMMAND_OUTPUT + 1U - used);
+            if (count == 0 || (count < 0 && errno == EIO))
+                break;
+            if (count < 0) {
+                if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+                    continue;
+                perror("read command output");
+                free(buffer);
+                return -1;
+            }
+            used += (size_t)count;
+            if (used > MAX_COMMAND_OUTPUT) {
+                fprintf(stderr, "Interactive command output exceeds %u bytes.\n",
+                        (unsigned)MAX_COMMAND_OUTPUT);
+                free(buffer);
+                return -1;
+            }
+            idle_ms = COMMAND_OUTPUT_IDLE_MS;
+        }
+    }
+    if (used == 0) {
+        free(buffer);
+        *text_out = NULL;
+        *length_out = 0;
+        return 0;
+    }
+    *text_out = buffer;
+    *length_out = used;
+    return 0;
+}
+
+static int make_audio_from_text(const AppConfig *config, char *wav_path,
+                                const unsigned char *text, size_t text_length,
+                                uint64_t *sample_count_out)
+{
+    strcpy(wav_path, "/tmp/textlite-dialog-XXXXXX.wav");
+    int descriptor = mkstemps(wav_path, 4);
+    if (descriptor < 0) {
+        perror("mkstemps");
+        return -1;
+    }
+    if (close(descriptor) != 0) {
+        perror("close temporary WAV");
+        unlink(wav_path);
+        return -1;
+    }
+
+    if (run_encoder(config, wav_path, text, text_length) != 0) {
+        unlink(wav_path);
+        return -1;
+    }
+    struct stat file_info;
+    if (stat(wav_path, &file_info) != 0) {
+        perror("stat encoded WAV");
+        unlink(wav_path);
+        return -1;
+    }
+    if (file_info.st_size <= 44 || (file_info.st_size - 44) % 2 != 0) {
+        fprintf(stderr, "Encoder produced an invalid or empty WAV file.\n");
+        unlink(wav_path);
+        return -1;
+    }
+    *sample_count_out = (uint64_t)(file_info.st_size - 44) / 2U;
+    return 0;
+}
+
+static pj_status_t receive_audio_frame(pjmedia_port *port, pjmedia_frame *frame)
+{
+    (void)port;
+    if (frame == NULL || frame->type != PJMEDIA_FRAME_TYPE_AUDIO ||
+        frame->buf == NULL || frame->size < sizeof(int16_t))
+        return PJ_SUCCESS;
+
+    const int16_t *input = frame->buf;
+    size_t input_count = frame->size / sizeof(*input);
+    unsigned channels = PJMEDIA_PIA_CCNT(&receive_port->info);
+    if (channels == 0)
+        return PJ_SUCCESS;
+    size_t frame_samples = input_count / channels;
+    if (frame_samples == 0)
+        return PJ_SUCCESS;
+    double power = 0.0;
+    double real[2] = {0.0, 0.0};
+    double imaginary[2] = {0.0, 0.0};
+    for (size_t i = 0; i < input_count; ++i) {
+        double value = input[i];
+        power += value * value;
+        size_t phase_index = i % RX_FRAME_SAMPLES;
+        for (size_t tone = 0; tone < 2; ++tone) {
+            real[tone] += value * receive_cosine[tone][phase_index];
+            imaginary[tone] += value * receive_sine[tone][phase_index];
+        }
+    }
+    double rms = sqrt(power / input_count);
+    double tone_energy = real[0] * real[0] + imaginary[0] * imaginary[0]
+                       + real[1] * real[1] + imaginary[1] * imaginary[1];
+    double tone_ratio = power > 0.0
+        ? tone_energy / ((double)input_count * power) : 0.0;
+    int tone_active = rms >= 220.0 && tone_ratio >= 0.08;
+
+    pthread_mutex_lock(&state_mutex);
+    if (!receive_enabled || receive_ready) {
+        pthread_mutex_unlock(&state_mutex);
+        return PJ_SUCCESS;
+    }
+    if (tone_active)
+        receive_saw_signal = 1;
+    if (!receive_saw_signal) {
+        pthread_mutex_unlock(&state_mutex);
+        return PJ_SUCCESS;
+    }
+
+    if (receive_sample_count + frame_samples > RX_MAX_SAMPLES) {
+        receive_overflow = 1;
+        receive_ready = 1;
+        receive_enabled = 0;
+        pthread_cond_broadcast(&state_changed);
+        pthread_mutex_unlock(&state_mutex);
+        return PJ_SUCCESS;
+    }
+    for (size_t sample = 0; sample < frame_samples; ++sample) {
+        int32_t sum = 0;
+        for (unsigned channel = 0; channel < channels; ++channel)
+            sum += input[sample * channels + channel];
+        receive_samples[receive_sample_count++] = (int16_t)(sum / (int32_t)channels);
+    }
+
+    if (tone_active) {
+        receive_signal_samples += frame_samples;
+        receive_silence_samples = 0;
+    } else {
+        receive_silence_samples += frame_samples;
+    }
+    if (receive_signal_samples >= RX_MIN_SIGNAL_SAMPLES &&
+        receive_silence_samples >= RX_END_SILENCE_SAMPLES) {
+        receive_ready = 1;
+        receive_enabled = 0;
+        pthread_cond_broadcast(&state_changed);
+    }
+    pthread_mutex_unlock(&state_mutex);
+    return PJ_SUCCESS;
+}
+
+static pj_status_t receive_port_on_destroy(pjmedia_port *port)
+{
+    pj_pool_t *pool = port->port_data.pdata;
+    pthread_mutex_lock(&state_mutex);
+    if (receive_port == port) {
+        receive_port = NULL;
+        receive_slot = -1;
+        if (receive_pool == pool)
+            receive_pool = NULL;
+    }
+    pthread_mutex_unlock(&state_mutex);
+    if (pool != NULL)
+        pj_pool_release(pool);
+    return PJ_SUCCESS;
+}
+
+static int create_receive_port(pjsua_conf_port_id call_slot)
+{
+    pjsua_conf_port_info call_info;
+    pj_status_t status = pjsua_conf_get_port_info(call_slot, &call_info);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not inspect incoming audio format", status);
+        return -1;
+    }
+    if (call_info.bits_per_sample != 16) {
+        fprintf(stderr, "Incoming audio bridge must provide 16-bit PCM.\n");
+        return -1;
+    }
+
+    if (receive_slot < 0) {
+        if (receive_pool == NULL) {
+            receive_pool = pjsua_pool_create("px-dialog-rx", 4096, 4096);
+            if (receive_pool == NULL) {
+                fprintf(stderr, "Could not allocate the incoming audio port pool.\n");
+                return -1;
+            }
+        }
+        if (receive_port == NULL) {
+            receive_port = pj_pool_zalloc(receive_pool, sizeof(*receive_port));
+            if (receive_port == NULL) {
+                perror("allocate receive audio buffer");
+                return -1;
+            }
+            pj_str_t name = pj_str("px-dialog-rx");
+            const double frequencies[2] = {1300.0, 1700.0};
+            for (size_t tone = 0; tone < 2; ++tone) {
+                for (size_t i = 0; i < RX_FRAME_SAMPLES; ++i) {
+                    double phase = 6.2831853071795864769 * frequencies[tone]
+                                 * (double)i / RX_SAMPLE_RATE;
+                    receive_cosine[tone][i] = cos(phase);
+                    receive_sine[tone][i] = sin(phase);
+                }
+            }
+            status = pjmedia_port_info_init(&receive_port->info, &name,
+                                            PJMEDIA_SIGNATURE('T','L','R','X'),
+                                            RX_SAMPLE_RATE, 1, 16,
+                                            RX_SAMPLE_RATE / 50);
+            if (status != PJ_SUCCESS) {
+                print_pj_error("Could not initialize incoming audio port", status);
+                return -1;
+            }
+            receive_port->port_data.pdata = receive_pool;
+            receive_port->put_frame = receive_audio_frame;
+            receive_port->on_destroy = receive_port_on_destroy;
+        }
+        if (receive_samples == NULL) {
+            receive_samples = malloc(RX_MAX_SAMPLES * sizeof(*receive_samples));
+            if (receive_samples == NULL) {
+                perror("allocate receive audio buffer");
+                return -1;
+            }
+        }
+        status = pjsua_conf_add_port(receive_pool, receive_port, &receive_slot);
+        if (status != PJ_SUCCESS) {
+            receive_slot = -1;
+            print_pj_error("Could not add incoming audio port", status);
+            return -1;
+        }
+    }
+    status = pjsua_conf_connect(call_slot, receive_slot);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not connect incoming audio to the decoder", status);
+        return -1;
+    }
+    return 0;
+}
+
+static int play_text(const AppConfig *config, pjsua_call_id call_id,
+                     pjsua_conf_port_id call_slot,
+                     const unsigned char *text, size_t text_length)
+{
+    char wav_path[sizeof("/tmp/textlite-dialog-XXXXXX.wav")];
+    wav_path[0] = '\0';
+    uint64_t sample_count = 0;
+    if (make_audio_from_text(config, wav_path, text, text_length,
+                             &sample_count) != 0)
+        return -1;
+
+    pjsua_player_id player_id = -1;
+    pjsua_conf_port_id player_slot = -1;
+    pj_status_t status;
+    pj_str_t filename = pj_str(wav_path);
+    status = pjsua_player_create(&filename, PJMEDIA_FILE_NO_LOOP, &player_id);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not open the encoded WAV for playback", status);
+        unlink(wav_path);
+        return -1;
+    }
+    pjmedia_port *player_port = NULL;
+    status = pjsua_player_get_port(player_id, &player_port);
+    if (status != PJ_SUCCESS || player_port == NULL) {
+        print_pj_error("Could not inspect the WAV player port", status);
+        pjsua_player_destroy(player_id);
+        unlink(wav_path);
+        return -1;
+    }
+    unsigned sample_rate = PJMEDIA_PIA_SRATE(&player_port->info);
+    if (sample_rate == 0)
+        sample_rate = 44100;
+    unsigned timeout_seconds = (unsigned)(sample_count / sample_rate) +
+                               PLAYBACK_TIMEOUT_MARGIN_SECONDS;
+    pthread_mutex_lock(&state_mutex);
+    active_player_id = player_id;
+    playback_is_finished = 0;
+    pthread_mutex_unlock(&state_mutex);
+    status = pjmedia_wav_player_set_eof_cb2(player_port,
+                                            (void *)(intptr_t)player_id,
+                                            on_player_eof);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not register WAV playback completion callback", status);
+        goto done;
+    }
+    player_slot = pjsua_player_get_conf_port(player_id);
+    status = pjsua_conf_connect(player_slot, call_slot);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not connect WAV playback to the SIP call", status);
+        player_slot = -1;
+        goto done;
+    }
+    fprintf(stderr, "Playing command response to call %d.\n", call_id);
+    if (wait_for_playback_finish(call_id, timeout_seconds) != 0)
+        goto done;
+    pj_thread_sleep(250);
+
+done:
+    pthread_mutex_lock(&state_mutex);
+    if (active_player_id == player_id)
+        active_player_id = -1;
+    pthread_mutex_unlock(&state_mutex);
+    if (player_slot >= 0 && call_is_current_and_active(call_id))
+        pjsua_conf_disconnect(player_slot, call_slot);
+    status = pjsua_player_destroy(player_id);
+    if (status != PJ_SUCCESS)
+        print_pj_error("Could not close the WAV player", status);
+    unlink(wav_path);
+    return call_is_current_and_active(call_id) ? 0 : -1;
+}
+
+static void on_player_eof(pjmedia_port *port, void *user_data)
+{
+    (void)port;
+    pjsua_player_id player_id = (pjsua_player_id)(intptr_t)user_data;
+    pthread_mutex_lock(&state_mutex);
+    if (active_player_id == player_id && !playback_is_finished) {
+        playback_is_finished = 1;
+        pthread_cond_broadcast(&state_changed);
+    }
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static int wait_for_audio_media(pjsua_call_id call_id,
+                                pjsua_conf_port_id *audio_slot_out)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+        perror("clock_gettime");
+        return -1;
+    }
+    deadline.tv_sec += MEDIA_WAIT_SECONDS;
+
+    pthread_mutex_lock(&state_mutex);
+    int wait_result = 0;
+    while (!stop_requested && call_is_active && active_call == call_id &&
+           !media_is_ready && wait_result == 0) {
+        wait_result = pthread_cond_timedwait(&state_changed, &state_mutex, &deadline);
+    }
+    int ready = !stop_requested && call_is_active && active_call == call_id &&
+                media_is_ready;
+    if (ready)
+        *audio_slot_out = active_audio_slot;
+    pthread_mutex_unlock(&state_mutex);
+
+    if (!ready) {
+        if (wait_result == ETIMEDOUT)
+            fprintf(stderr, "Timed out waiting for active SIP audio.\n");
+        return -1;
+    }
+    return 0;
+}
+
+static int wait_for_playback_finish(pjsua_call_id call_id,
+                                    unsigned timeout_seconds)
+{
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+        perror("clock_gettime");
+        return -1;
+    }
+    deadline.tv_sec += (time_t)timeout_seconds;
+
+    pthread_mutex_lock(&state_mutex);
+    int wait_result = 0;
+    while (!stop_requested && call_is_active && active_call == call_id &&
+           !playback_is_finished && wait_result == 0) {
+        wait_result = pthread_cond_timedwait(&state_changed, &state_mutex, &deadline);
+    }
+    int finished = !stop_requested && call_is_active && active_call == call_id &&
+                   playback_is_finished;
+    pthread_mutex_unlock(&state_mutex);
+
+    if (!finished && wait_result == ETIMEDOUT)
+        fprintf(stderr, "Timed out waiting for SIP audio playback to finish.\n");
+    return finished ? 0 : -1;
+}
+
+static void *call_worker(void *argument)
+{
+    WorkerArgs *args = argument;
+    const AppConfig *config = args->config;
+    pjsua_call_id call_id = args->call_id;
+    free(args);
+
+    pj_thread_desc thread_description;
+    pj_thread_t *pj_thread = NULL;
+    memset(thread_description, 0, sizeof(thread_description));
+    pj_status_t status = pj_thread_register("sip-dialog-worker",
+                                            thread_description, &pj_thread);
+    int thread_registered = status == PJ_SUCCESS;
+    if (!thread_registered)
+        print_pj_error("Could not register the call worker thread", status);
+
+    pjsua_conf_port_id call_slot = -1;
+    int should_hangup = 1;
+    unsigned char *last_response = NULL;
+    size_t last_response_length = 0;
+    if (!call_is_current_and_active(call_id))
+        goto cleanup;
+    if (wait_for_audio_media(call_id, &call_slot) != 0) {
+        if (!call_is_current_and_active(call_id))
+            should_hangup = 0;
+        goto cleanup;
+    }
+    if (create_receive_port(call_slot) != 0)
+        goto cleanup;
+    if (spawn_interactive_command(config->command) != 0)
+        goto cleanup;
+
+    fprintf(stderr, "Interactive command started for call %d.\n", call_id);
+    for (;;) {
+        unsigned char *command_text = NULL;
+        size_t command_text_length = 0;
+        if (collect_command_output(&command_text, &command_text_length) != 0)
+            goto cleanup;
+        if (command_text_length != 0) {
+            normalize_command_output(command_text, &command_text_length);
+            if (command_text_length == 0) {
+                fprintf(stderr, "Command output contained only blank lines.\n");
+                free(command_text);
+                command_text = NULL;
+            }
+        }
+        if (command_text_length != 0) {
+            free(last_response);
+            last_response = command_text;
+            last_response_length = command_text_length;
+            command_text = NULL;
+            print_escaped_text("Sending to PX", last_response,
+                               last_response_length);
+            if (play_text(config, call_id, call_slot, last_response,
+                          last_response_length) != 0) {
+                free(command_text);
+                if (!call_is_current_and_active(call_id))
+                    should_hangup = 0;
+                goto cleanup;
+            }
+        }
+        free(command_text);
+        if (!call_is_current_and_active(call_id)) {
+            should_hangup = 0;
+            goto cleanup;
+        }
+
+        int child_status = 0;
+        pid_t child_result = waitpid(interactive_command_pid, &child_status, WNOHANG);
+        if (child_result == interactive_command_pid) {
+            fprintf(stderr, "Interactive text command exited; ending call.\n");
+            stop_command_group(interactive_command_pid);
+            forget_command_group(interactive_command_pid);
+            interactive_command_pid = -1;
+            goto cleanup;
+        }
+        if (child_result < 0 && errno == ECHILD) {
+            forget_command_group(interactive_command_pid);
+            interactive_command_pid = -1;
+            goto cleanup;
+        }
+
+        pthread_mutex_lock(&state_mutex);
+        receive_sample_count = 0;
+        receive_silence_samples = 0;
+        receive_signal_samples = 0;
+        receive_saw_signal = 0;
+        receive_ready = 0;
+        receive_overflow = 0;
+        receive_enabled = 1;
+        int wait_result = 0;
+        while (!stop_requested && call_is_active && active_call == call_id &&
+               !receive_ready && wait_result == 0) {
+            struct timespec deadline;
+            if (clock_gettime(CLOCK_REALTIME, &deadline) != 0) {
+                wait_result = errno;
+                break;
+            }
+            deadline.tv_sec += 1;
+            wait_result = pthread_cond_timedwait(&state_changed, &state_mutex,
+                                                 &deadline);
+            if (wait_result == ETIMEDOUT)
+                wait_result = 0;
+        }
+        int got_message = receive_ready;
+        int overflow = receive_overflow;
+        size_t sample_count = receive_sample_count;
+        int16_t *samples = NULL;
+        if (got_message && sample_count != 0) {
+            samples = malloc(sample_count * sizeof(*samples));
+            if (samples != NULL)
+                memcpy(samples, receive_samples, sample_count * sizeof(*samples));
+        }
+        receive_enabled = 0;
+        receive_sample_count = 0;
+        receive_ready = 0;
+        int still_active = !stop_requested && call_is_active &&
+                           active_call == call_id;
+        pthread_mutex_unlock(&state_mutex);
+
+        if (!still_active) {
+            free(samples);
+            should_hangup = 0;
+            goto cleanup;
+        }
+        if (!got_message)
+            continue;
+        fprintf(stderr, "Captured incoming audio: %zu samples (%.2f seconds).\n",
+                sample_count, (double)sample_count / RX_SAMPLE_RATE);
+        if (overflow)
+            fprintf(stderr, "Incoming message exceeded the receive audio limit.\n");
+        if (samples == NULL) {
+            fprintf(stderr, "Could not allocate incoming message buffer.\n");
+            goto cleanup;
+        }
+
+        unsigned char *message = NULL;
+        size_t message_length = 0;
+        unsigned detected_baud = 0;
+        int decoded = decode_pcm_samples(samples, sample_count, &message,
+                                         &message_length, &detected_baud);
+        free(samples);
+        if (decoded < 0) {
+            fprintf(stderr, "No valid PX message found in received audio.\n");
+            continue;
+        }
+        if (decoded > 0) {
+            fprintf(stderr, "Received PX data without printable text.\n");
+            continue;
+        }
+        /* The default PX margin byte (40) is '(' and is protocol metadata. */
+        if (message_length != 0 && message[0] == '(') {
+            memmove(message, message + 1, message_length - 1);
+            --message_length;
+        }
+        fprintf(stderr, "Received PX message at %u baud (%zu bytes).\n",
+                detected_baud, message_length);
+        print_escaped_text("Caller wrote", message, message_length);
+        if (is_repeat_request(message, message_length)) {
+            free(message);
+            if (last_response == NULL || last_response_length == 0) {
+                fprintf(stderr, "Repeat requested before any response was sent.\n");
+                continue;
+            }
+            fprintf(stderr, "Repeating the last response to call %d.\n", call_id);
+            if (play_text(config, call_id, call_slot, last_response,
+                          last_response_length) != 0) {
+                if (!call_is_current_and_active(call_id))
+                    should_hangup = 0;
+                goto cleanup;
+            }
+            continue;
+        }
+        if (write_all(command_terminal, message, message_length) != 0) {
+            perror("write interactive command input");
+            free(message);
+            goto cleanup;
+        }
+        free(message);
+    }
+
+cleanup:
+    free(last_response);
+    pthread_mutex_lock(&state_mutex);
+    receive_enabled = 0;
+    receive_ready = 0;
+    pthread_mutex_unlock(&state_mutex);
+
+    if (receive_slot >= 0 && call_slot >= 0 &&
+        call_is_current_and_active(call_id))
+        pjsua_conf_disconnect(call_slot, receive_slot);
+
+    if (command_terminal >= 0) {
+        close(command_terminal);
+        command_terminal = -1;
+    }
+    if (interactive_command_pid > 0) {
+        pid_t child = interactive_command_pid;
+        stop_command_group(child);
+        int child_status = 0;
+        if (wait_for_child(child, &child_status) != 0)
+            fprintf(stderr, "Could not wait for interactive command.\n");
+        forget_command_group(child);
+        interactive_command_pid = -1;
+    }
+    if (should_hangup)
+        hangup_if_active(call_id);
+
+    pthread_mutex_lock(&state_mutex);
+    worker_is_finished = 1;
+    pthread_cond_broadcast(&state_changed);
+    pthread_mutex_unlock(&state_mutex);
+    if (thread_registered)
+        pj_thread_unregister();
+    return NULL;
+}
+
+static void on_incoming_call(pjsua_acc_id account_id, pjsua_call_id call_id,
+                             pjsip_rx_data *request)
+{
+    (void)account_id;
+    (void)request;
+
+    /* Reserve the single-call slot before answering; a joinable prior worker
+       also keeps a new call from starting until that worker is joined. */
+    pthread_mutex_lock(&state_mutex);
+    int busy = stop_requested || call_is_active || worker_is_joinable;
+    if (!busy) {
+        call_is_active = 1;
+        active_call = call_id;
+        active_audio_slot = -1;
+        media_is_ready = 0;
+        worker_is_finished = 0;
+    }
+    pthread_mutex_unlock(&state_mutex);
+
+    if (busy) {
+        fprintf(stderr, "Rejecting incoming call: already processing a call.\n");
+        pjsua_call_answer(call_id, PJSIP_SC_BUSY_HERE, NULL, NULL);
+        return;
+    }
+
+    fprintf(stderr, "Accepting incoming call %d.\n", call_id);
+    pj_status_t status = pjsua_call_answer(call_id, PJSIP_SC_OK, NULL, NULL);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not answer incoming call", status);
+        mark_call_inactive(call_id);
+        return;
+    }
+
+    WorkerArgs *args = malloc(sizeof(*args));
+    if (args == NULL) {
+        perror("malloc worker arguments");
+        pjsua_call_hangup(call_id, 0, NULL, NULL);
+        mark_call_inactive(call_id);
+        return;
+    }
+    args->config = app_config;
+    args->call_id = call_id;
+
+    pthread_t thread;
+    int error = pthread_create(&thread, NULL, call_worker, args);
+    if (error != 0) {
+        fprintf(stderr, "Could not start call worker: %s\n", strerror(error));
+        free(args);
+        pjsua_call_hangup(call_id, 0, NULL, NULL);
+        mark_call_inactive(call_id);
+        pthread_mutex_lock(&state_mutex);
+        worker_is_finished = 1;
+        pthread_mutex_unlock(&state_mutex);
+        return;
+    }
+    pthread_mutex_lock(&state_mutex);
+    worker_thread = thread;
+    worker_is_joinable = 1;
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static void on_call_media_state(pjsua_call_id call_id)
+{
+    pjsua_call_info info;
+    pj_status_t status = pjsua_call_get_info(call_id, &info);
+    if (status != PJ_SUCCESS)
+        return;
+
+    /* Only an active audio stream that can transmit is a valid target for the
+       WAV player's conference connection. */
+    pjsua_conf_port_id audio_slot = -1;
+    for (unsigned i = 0; i < info.media_cnt; ++i) {
+        if (info.media[i].type == PJMEDIA_TYPE_AUDIO &&
+            info.media[i].status == PJSUA_CALL_MEDIA_ACTIVE &&
+            (info.media[i].dir & PJMEDIA_DIR_ENCODING) &&
+            (info.media[i].dir & PJMEDIA_DIR_DECODING)) {
+            audio_slot = info.media[i].stream.aud.conf_slot;
+            break;
+        }
+    }
+    if (audio_slot < 0)
+        return;
+
+    pthread_mutex_lock(&state_mutex);
+    if (call_is_active && active_call == call_id) {
+        active_audio_slot = audio_slot;
+        media_is_ready = 1;
+        pthread_cond_broadcast(&state_changed);
+    }
+    pthread_mutex_unlock(&state_mutex);
+}
+
+static void on_call_state(pjsua_call_id call_id, pjsip_event *event)
+{
+    (void)event;
+    pjsua_call_info info;
+    if (pjsua_call_get_info(call_id, &info) != PJ_SUCCESS)
+        return;
+    if (info.state == PJSIP_INV_STATE_DISCONNECTED) {
+        fprintf(stderr, "Call %d disconnected.\n", call_id);
+        mark_call_inactive(call_id);
+    }
+}
+
+static void on_registration_state(pjsua_acc_id account_id)
+{
+    pjsua_acc_info info;
+    if (pjsua_acc_get_info(account_id, &info) == PJ_SUCCESS)
+        fprintf(stderr, "SIP registration status: %d\n", (int)info.status);
+}
+
+static int parse_unsigned(const char *text, unsigned minimum, unsigned maximum,
+                          unsigned *value_out)
+{
+    char *end = NULL;
+    errno = 0;
+    unsigned long value = strtoul(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' ||
+        value < minimum || value > maximum)
+        return -1;
+    *value_out = (unsigned)value;
+    return 0;
+}
+
+static int resolve_bind_address(const char *target, char *address,
+                                size_t address_size)
+{
+    struct in_addr parsed_address;
+    if (inet_pton(AF_INET, target, &parsed_address) == 1) {
+        if (strlen(target) >= address_size)
+            return -1;
+        strcpy(address, target);
+        return 0;
+    }
+
+    /* Otherwise interpret target as an interface name and use its first
+       reported IPv4 address. */
+    struct ifaddrs *interfaces;
+    if (getifaddrs(&interfaces) != 0) {
+        perror("getifaddrs");
+        return -1;
+    }
+
+    int found = 0;
+    for (const struct ifaddrs *interface = interfaces; interface != NULL;
+         interface = interface->ifa_next) {
+        if (interface->ifa_addr == NULL ||
+            interface->ifa_addr->sa_family != AF_INET ||
+            strcmp(interface->ifa_name, target) != 0)
+            continue;
+        const struct sockaddr_in *socket_address =
+            (const struct sockaddr_in *)interface->ifa_addr;
+        if (inet_ntop(AF_INET, &socket_address->sin_addr, address,
+                      (socklen_t)address_size) != NULL)
+            found = 1;
+        break;
+    }
+    freeifaddrs(interfaces);
+
+    if (!found) {
+        fprintf(stderr,
+                "Could not find an IPv4 address for bind target '%s'; use an IPv4 address or interface name.\n",
+                target);
+        return -1;
+    }
+    return 0;
+}
+
+static int parse_gap_text(const char *text)
+{
+    char *end = NULL;
+    errno = 0;
+    double value = strtod(text, &end);
+    if (errno != 0 || end == text || *end != '\0' || !isfinite(value) ||
+        value < 0.0 || value > 600.0)
+        return -1;
+    return 0;
+}
+
+static int add_extra_encoder_arg(AppConfig *config, const char *argument)
+{
+    if (config->extra_encoder_arg_count >= MAX_ENCODER_ARGS) {
+        fprintf(stderr, "Too many extra encoder arguments (max %u).\n",
+                (unsigned)MAX_ENCODER_ARGS);
+        return -1;
+    }
+    config->extra_encoder_args[config->extra_encoder_arg_count++] = argument;
+    return 0;
+}
+
+static void print_usage(const char *program)
+{
+    fprintf(stderr,
+            "Usage: %s --registrar sip:host --identity sip:user@host --username name --command shell-command [options] [-- encoder-args...]\n",
+            program);
+    fprintf(stderr, "Options:\n");
+    fprintf(stderr, "  --registrar URI       SIP registrar URI (required; UDP).\n");
+    fprintf(stderr, "  --identity URI        SIP account identity (required).\n");
+    fprintf(stderr, "  --username name       SIP digest-auth username (required).\n");
+    fprintf(stderr, "  --password password   SIP password (or set SIP_PASSWORD).\n");
+    fprintf(stderr, "  --command command     Interactive shell command; stdin receives text and stdout is sent to the caller.\n");
+    fprintf(stderr, "  --encoder path        Encoder program (default: ./encode).\n");
+    fprintf(stderr, "  --baud rate           300, 600, or 1200 (default: 300).\n");
+    fprintf(stderr, "  --margin value        Encoder margin byte, 0 to 127 (default: 40).\n");
+    fprintf(stderr, "  --speak               Enable speech before transmission (encode -s).\n");
+    fprintf(stderr, "  --lang code           eSpeak NG language/voice code (encode -l).\n");
+    fprintf(stderr, "  --gap seconds         Silence after speech, 0 to 600 (encode -g).\n");
+    fprintf(stderr, "  --encoder-arg arg     Extra argument forwarded to encoder (repeatable).\n");
+    fprintf(stderr, "  --                    Forward all remaining arguments to encoder.\n");
+    fprintf(stderr, "  --port number         Local UDP port, 0 to 65535 (default: 0, auto).\n");
+    fprintf(stderr, "  --rtp-port number     Even local RTP port, 0 or 2 to 65534 (default: 0, auto).\n");
+    fprintf(stderr, "  --bind target         Local IPv4 address or interface name to bind.\n");
+    fprintf(stderr, "  --public-address IPv4 Public IPv4 address advertised in SIP and SDP.\n");
+    fprintf(stderr, "  -h, --help            Show this help.\n");
+    fprintf(stderr, "The client answers one call at a time and runs the command until the caller hangs up or it exits.\n");
+    fprintf(stderr, "Send ?repeat to replay the last command response.\n");
+}
+
+static int parse_arguments(int argc, char **argv, AppConfig *config)
+{
+    *config = (AppConfig){
+        .encoder = "./encode",
+        .baud_rate = 300,
+        .local_port = DEFAULT_SIP_PORT
+    };
+
+    for (int index = 1; index < argc;) {
+        const char *option = argv[index++];
+        if (strcmp(option, "-h") == 0 || strcmp(option, "--help") == 0) {
+            print_usage(argv[0]);
+            return 1;
+        }
+        if (strcmp(option, "--speak") == 0) {
+            config->speak = 1;
+            continue;
+        }
+        if (strcmp(option, "--") == 0) {
+            while (index < argc) {
+                if (add_extra_encoder_arg(config, argv[index++]) != 0)
+                    return -1;
+            }
+            break;
+        }
+        if (index >= argc) {
+            print_usage(argv[0]);
+            return -1;
+        }
+        const char *value = argv[index++];
+        if (strcmp(option, "--registrar") == 0)
+            config->registrar = value;
+        else if (strcmp(option, "--identity") == 0)
+            config->identity = value;
+        else if (strcmp(option, "--username") == 0)
+            config->username = value;
+        else if (strcmp(option, "--password") == 0)
+            config->password = value;
+        else if (strcmp(option, "--command") == 0)
+            config->command = value;
+        else if (strcmp(option, "--encoder") == 0)
+            config->encoder = value;
+        else if (strcmp(option, "--baud") == 0) {
+            if (parse_unsigned(value, 300, 1200, &config->baud_rate) != 0 ||
+                (config->baud_rate != 300 && config->baud_rate != 600 &&
+                 config->baud_rate != 1200)) {
+                fprintf(stderr, "Baud rate must be 300, 600, or 1200.\n");
+                return -1;
+            }
+        } else if (strcmp(option, "--margin") == 0) {
+            if (parse_unsigned(value, 0, 127, &config->margin) != 0) {
+                fprintf(stderr, "Margin must be an integer from 0 to 127.\n");
+                return -1;
+            }
+            config->margin_set = 1;
+        } else if (strcmp(option, "--lang") == 0) {
+            if (value[0] == '\0' || value[0] == '-') {
+                fprintf(stderr, "Language must be an eSpeak NG voice code, such as cs or en-us.\n");
+                return -1;
+            }
+            config->speech_language = value;
+        } else if (strcmp(option, "--gap") == 0) {
+            if (parse_gap_text(value) != 0) {
+                fprintf(stderr, "Gap must be a number from 0 to 600 seconds.\n");
+                return -1;
+            }
+            config->gap_seconds = value;
+        } else if (strcmp(option, "--encoder-arg") == 0) {
+            if (add_extra_encoder_arg(config, value) != 0)
+                return -1;
+        } else if (strcmp(option, "--port") == 0) {
+            if (parse_unsigned(value, 0, 65535, &config->local_port) != 0) {
+                fprintf(stderr, "Local SIP port must be from 0 to 65535.\n");
+                return -1;
+            }
+        } else if (strcmp(option, "--rtp-port") == 0) {
+            if (parse_unsigned(value, 0, 65534, &config->rtp_port) != 0 ||
+                (config->rtp_port != 0 && (config->rtp_port & 1U) != 0)) {
+                fprintf(stderr, "Local RTP port must be 0 or an even port from 2 to 65534.\n");
+                return -1;
+            }
+        } else if (strcmp(option, "--bind") == 0) {
+            if (value[0] == '\0' || value[0] == '-') {
+                fprintf(stderr, "Bind target must be an IPv4 address or interface name.\n");
+                return -1;
+            }
+            config->bind_target = value;
+        } else if (strcmp(option, "--public-address") == 0) {
+            struct in_addr address;
+            if (inet_pton(AF_INET, value, &address) != 1) {
+                fprintf(stderr, "Public address must be an IPv4 address.\n");
+                return -1;
+            }
+            config->public_address = value;
+        } else {
+            print_usage(argv[0]);
+            return -1;
+        }
+    }
+
+    if (config->password == NULL)
+        config->password = getenv("SIP_PASSWORD");
+    if (config->password != NULL && config->password[0] == '\0')
+        config->password = NULL;
+
+    if (config->registrar == NULL || config->identity == NULL ||
+        config->username == NULL || config->username[0] == '\0' ||
+        config->command == NULL || config->command[0] == '\0' ||
+        strncmp(config->registrar, "sip:", 4) != 0 ||
+        strncmp(config->identity, "sip:", 4) != 0) {
+        fprintf(stderr, "Registrar, SIP identity, username, and command are required.\n");
+        print_usage(argv[0]);
+        return -1;
+    }
+    return 0;
+}
+
+static void reap_finished_worker(void)
+{
+    pthread_t thread;
+    int should_join = 0;
+    /* Claim the thread while locked, then join outside the lock so the worker
+       can publish its final state without deadlocking. */
+    pthread_mutex_lock(&state_mutex);
+    if (worker_is_joinable && worker_is_finished) {
+        thread = worker_thread;
+        worker_is_joinable = 0;
+        should_join = 1;
+    }
+    pthread_mutex_unlock(&state_mutex);
+    if (should_join) {
+        int error = pthread_join(thread, NULL);
+        if (error != 0)
+            fprintf(stderr, "Could not join call worker: %s\n", strerror(error));
+    }
+}
+
+static void configure_modem_codecs(void)
+{
+    /* Prefer waveform codecs (G.711/G.722) so FSK tones are not mangled by vocoders. */
+    pjsua_codec_info codecs[64];
+    unsigned count = sizeof(codecs) / sizeof(codecs[0]);
+    if (pjsua_enum_codecs(codecs, &count) != PJ_SUCCESS)
+        return;
+
+    /* Companded waveform codecs preserve FSK tones; speech codecs can distort
+       them enough to make the received modem data undecodable. */
+    for (unsigned i = 0; i < count; ++i) {
+        const pj_str_t *id = &codecs[i].codec_id;
+        pj_uint8_t priority = codecs[i].priority;
+        if (pj_strnicmp2(id, "PCMA/8000/", 10) == 0)
+            priority = PJMEDIA_CODEC_PRIO_HIGHEST;
+        else if (pj_strnicmp2(id, "PCMU/8000/", 10) == 0)
+            priority = PJMEDIA_CODEC_PRIO_HIGHEST - 1;
+        else if (pj_strnicmp2(id, "G722/16000/", 11) == 0)
+            priority = PJMEDIA_CODEC_PRIO_NORMAL + 50;
+        else if (pj_strnicmp2(id, "speex/", 6) == 0 ||
+                 pj_strnicmp2(id, "iLBC/", 5) == 0 ||
+                 pj_strnicmp2(id, "GSM/", 4) == 0)
+            priority = PJMEDIA_CODEC_PRIO_LOWEST;
+        else
+            continue;
+
+        pjsua_codec_set_priority(id, priority);
+    }
+}
+
+int main(int argc, char **argv)
+{
+    AppConfig config;
+    int parsed = parse_arguments(argc, argv, &config);
+    if (parsed != 0)
+        return parsed > 0 ? 0 : 2;
+    app_config = &config;
+
+    signal(SIGPIPE, SIG_IGN);
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = request_stop;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGTERM, &action, NULL);
+
+    pj_status_t status = pjsua_create();
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not create PJSIP endpoint", status);
+        return 1;
+    }
+
+    pjsua_config ua_config;
+    pjsua_logging_config logging_config;
+    pjsua_media_config media_config;
+    pjsua_config_default(&ua_config);
+    ua_config.max_calls = 4;
+    ua_config.cb.on_incoming_call = on_incoming_call;
+    ua_config.cb.on_call_media_state = on_call_media_state;
+    ua_config.cb.on_call_state = on_call_state;
+    ua_config.cb.on_reg_state = on_registration_state;
+    pjsua_logging_config_default(&logging_config);
+    logging_config.console_level = 3;
+    pjsua_media_config_default(&media_config);
+    media_config.clock_rate = RX_SAMPLE_RATE;
+    media_config.no_vad = PJ_TRUE;
+    media_config.ec_tail_len = 0;
+
+    status = pjsua_init(&ua_config, &logging_config, &media_config);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not initialize PJSIP", status);
+        goto shutdown;
+    }
+    configure_modem_codecs();
+
+    pjsua_transport_config transport_config;
+    pjsua_transport_config_default(&transport_config);
+    transport_config.port = config.local_port;
+    if (config.public_address != NULL)
+        transport_config.public_addr = pj_str((char *)config.public_address);
+    char bind_address[INET_ADDRSTRLEN];
+    if (config.bind_target != NULL) {
+        if (resolve_bind_address(config.bind_target, bind_address,
+                                 sizeof(bind_address)) != 0) {
+            status = PJ_EINVAL;
+            goto shutdown;
+        }
+        transport_config.bound_addr = pj_str(bind_address);
+    }
+    status = pjsua_transport_create(PJSIP_TRANSPORT_UDP, &transport_config, NULL);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not create UDP SIP transport", status);
+        goto shutdown;
+    }
+
+    status = pjsua_start();
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not start PJSIP", status);
+        goto shutdown;
+    }
+    status = pjsua_set_null_snd_dev();
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not initialize the null audio device", status);
+        goto shutdown;
+    }
+
+    pjsua_acc_config account_config;
+    pjsua_acc_config_default(&account_config);
+    account_config.id = pj_str((char *)config.identity);
+    account_config.reg_uri = pj_str((char *)config.registrar);
+    if (config.rtp_port != 0) {
+        account_config.rtp_cfg.port = config.rtp_port;
+        account_config.rtp_cfg.port_range = 1;
+    }
+    if (config.public_address != NULL)
+        account_config.rtp_cfg.public_addr = pj_str((char *)config.public_address);
+    if (config.bind_target != NULL)
+        account_config.rtp_cfg.bound_addr = pj_str(bind_address);
+    if (config.password != NULL) {
+        account_config.cred_count = 1;
+        account_config.cred_info[0].realm = pj_str("*");
+        account_config.cred_info[0].scheme = pj_str("digest");
+        account_config.cred_info[0].username = pj_str((char *)config.username);
+        account_config.cred_info[0].data_type = PJSIP_CRED_DATA_PLAIN_PASSWD;
+        account_config.cred_info[0].data = pj_str((char *)config.password);
+    }
+    pjsua_acc_id account_id;
+    status = pjsua_acc_add(&account_config, PJ_TRUE, &account_id);
+    if (status != PJ_SUCCESS) {
+        print_pj_error("Could not add SIP account", status);
+        goto shutdown;
+    }
+
+    fprintf(stderr, "SIP client started; waiting for incoming calls.\n");
+    while (!stop_requested) {
+        reap_finished_worker();
+        struct timespec deadline;
+        if (clock_gettime(CLOCK_REALTIME, &deadline) == 0) {
+            deadline.tv_sec += 1;
+            pthread_mutex_lock(&state_mutex);
+            if (!stop_requested && !(worker_is_joinable && worker_is_finished))
+                pthread_cond_timedwait(&state_changed, &state_mutex, &deadline);
+            pthread_mutex_unlock(&state_mutex);
+        } else {
+            sleep(1);
+        }
+    }
+
+shutdown:
+    pthread_mutex_lock(&state_mutex);
+    pid_t command_group = command_process_group;
+    pjsua_call_id call_id = call_is_active ? active_call : -1;
+    pthread_cond_broadcast(&state_changed);
+    pthread_mutex_unlock(&state_mutex);
+    if (command_group > 0)
+        stop_command_group(command_group);
+    if (call_id >= 0)
+        pjsua_call_hangup(call_id, 0, NULL, NULL);
+
+    pthread_t thread;
+    int join_worker = 0;
+    pthread_mutex_lock(&state_mutex);
+    if (worker_is_joinable) {
+        thread = worker_thread;
+        worker_is_joinable = 0;
+        join_worker = 1;
+    }
+    pthread_mutex_unlock(&state_mutex);
+    if (join_worker)
+        pthread_join(thread, NULL);
+
+    pjsua_destroy();
+    if (receive_pool != NULL)
+        pj_pool_release(receive_pool);
+    free(receive_samples);
+    return status == PJ_SUCCESS ? 0 : 1;
+}

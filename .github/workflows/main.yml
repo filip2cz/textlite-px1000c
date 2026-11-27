@@ -76,11 +76,13 @@ jobs:
 
           PJSIP_X64_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-x64/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_X64_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-x64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X64_CFLAGS sip.c $PJSIP_X64_LIBS -pthread -o build/sip-linux-x64
+          gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X64_CFLAGS sip-onetime.c $PJSIP_X64_LIBS -pthread -o build/sip-onetime-linux-x64
+          gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X64_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_X64_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-x64
 
           PJSIP_X86_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-x86/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_X86_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-x86/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X86_CFLAGS sip.c $PJSIP_X86_LIBS -pthread -o build/sip-linux-x86
+          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X86_CFLAGS sip-onetime.c $PJSIP_X86_LIBS -pthread -o build/sip-onetime-linux-x86
+          gcc -m32 -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_X86_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_X86_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-x86
 
       - name: Upload x86 binaries
         uses: actions/upload-artifact@v7
@@ -91,8 +93,10 @@ jobs:
             build/decode-linux-x86
             build/encode-linux-x64
             build/encode-linux-x86
-            build/sip-linux-x64
-            build/sip-linux-x86
+            build/sip-onetime-linux-x64
+            build/sip-dialog-linux-x64
+            build/sip-onetime-linux-x86
+            build/sip-dialog-linux-x86
           if-no-files-found: error
 
   build-arm:
@@ -142,11 +146,13 @@ jobs:
 
           PJSIP_AARCH64_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-aarch64/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_AARCH64_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-aarch64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_AARCH64_CFLAGS sip.c $PJSIP_AARCH64_LIBS -pthread -o build/sip-linux-aarch64
+          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_AARCH64_CFLAGS sip-onetime.c $PJSIP_AARCH64_LIBS -pthread -o build/sip-onetime-linux-aarch64
+          aarch64-linux-gnu-gcc -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_AARCH64_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_AARCH64_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-aarch64
 
           PJSIP_ARMV7_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv7l/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_ARMV7_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv7l/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV7_CFLAGS sip.c $PJSIP_ARMV7_LIBS -pthread -o build/sip-linux-armv7l
+          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV7_CFLAGS sip-onetime.c $PJSIP_ARMV7_LIBS -pthread -o build/sip-onetime-linux-armv7l
+          arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=vfpv3-d16 -mfloat-abi=hard -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV7_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_ARMV7_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-armv7l
 
       - name: Upload AArch64 and ARMv7 binaries
         uses: actions/upload-artifact@v7
@@ -157,8 +163,10 @@ jobs:
             build/decode-linux-armv7l
             build/encode-linux-aarch64
             build/encode-linux-armv7l
-            build/sip-linux-aarch64
-            build/sip-linux-armv7l
+            build/sip-onetime-linux-aarch64
+            build/sip-dialog-linux-aarch64
+            build/sip-onetime-linux-armv7l
+            build/sip-dialog-linux-armv7l
           if-no-files-found: error
 
   build-armv5:
@@ -200,7 +208,8 @@ jobs:
 
           PJSIP_ARMV5_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv5te/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_ARMV5_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-armv5te/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV5_CFLAGS sip.c $PJSIP_ARMV5_LIBS -pthread -o build/sip-linux-armv5te
+          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV5_CFLAGS sip-onetime.c $PJSIP_ARMV5_LIBS -pthread -o build/sip-onetime-linux-armv5te
+          arm-linux-gnueabi-gcc -march=armv5te -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_ARMV5_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_ARMV5_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-armv5te
 
       - name: Upload ARMv5 binaries
         uses: actions/upload-artifact@v7
@@ -209,7 +218,8 @@ jobs:
           path: |
             build/decode-linux-armv5te
             build/encode-linux-armv5te
-            build/sip-linux-armv5te
+            build/sip-onetime-linux-armv5te
+            build/sip-dialog-linux-armv5te
           if-no-files-found: error
 
   build-riscv64:
@@ -249,7 +259,8 @@ jobs:
 
           PJSIP_RISCV_CFLAGS=$(PKG_CONFIG_PATH=/tmp/pjsip-riscv64/lib/pkgconfig pkg-config --static --cflags libpjproject)
           PJSIP_RISCV_LIBS=$(PKG_CONFIG_PATH=/tmp/pjsip-riscv64/lib/pkgconfig pkg-config --static --libs libpjproject | sed 's/-lstdc++//g')
-          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_RISCV_CFLAGS sip.c $PJSIP_RISCV_LIBS -pthread -o build/sip-linux-riscv64
+          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_RISCV_CFLAGS sip-onetime.c $PJSIP_RISCV_LIBS -pthread -o build/sip-onetime-linux-riscv64
+          riscv64-linux-gnu-gcc -march=rv64gc -mabi=lp64d -std=c11 -O2 -Wall -Wextra -Werror $PJSIP_RISCV_CFLAGS sip-dialog.c decode.c -DDECODE_LIBRARY_ONLY $PJSIP_RISCV_LIBS -lm -lutil -pthread -o build/sip-dialog-linux-riscv64
 
       - name: Upload RISC-V binaries
         uses: actions/upload-artifact@v7
@@ -258,7 +269,8 @@ jobs:
           path: |
             build/decode-linux-riscv64
             build/encode-linux-riscv64
-            build/sip-linux-riscv64
+            build/sip-onetime-linux-riscv64
+            build/sip-dialog-linux-riscv64
           if-no-files-found: error
 
   verify-binaries:
@@ -310,18 +322,24 @@ jobs:
           check_help encode-linux-armv5te "Usage: .*encode" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/encode-linux-armv5te
           check_help encode-linux-riscv64 "Usage: .*encode" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/encode-linux-riscv64
 
-          check_help sip-linux-x64 "Usage: .*sip" ./build/sip-linux-x64
-          check_help sip-linux-x86 "Usage: .*sip" ./build/sip-linux-x86
-          check_help sip-linux-aarch64 "Usage: .*sip" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/sip-linux-aarch64
-          check_help sip-linux-armv7l "Usage: .*sip" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/sip-linux-armv7l
-          check_help sip-linux-armv5te "Usage: .*sip" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/sip-linux-armv5te
-          check_help sip-linux-riscv64 "Usage: .*sip" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/sip-linux-riscv64
+          check_help sip-onetime-linux-x64 "Usage: .*sip" ./build/sip-onetime-linux-x64
+          check_help sip-dialog-linux-x64 "Usage: .*sip-dialog" ./build/sip-dialog-linux-x64
+          check_help sip-onetime-linux-x86 "Usage: .*sip" ./build/sip-onetime-linux-x86
+          check_help sip-dialog-linux-x86 "Usage: .*sip-dialog" ./build/sip-dialog-linux-x86
+          check_help sip-onetime-linux-aarch64 "Usage: .*sip" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/sip-onetime-linux-aarch64
+          check_help sip-dialog-linux-aarch64 "Usage: .*sip-dialog" qemu-aarch64 -L /usr/aarch64-linux-gnu ./build/sip-dialog-linux-aarch64
+          check_help sip-onetime-linux-armv7l "Usage: .*sip" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/sip-onetime-linux-armv7l
+          check_help sip-dialog-linux-armv7l "Usage: .*sip-dialog" qemu-arm -cpu cortex-a8 -L /usr/arm-linux-gnueabihf ./build/sip-dialog-linux-armv7l
+          check_help sip-onetime-linux-armv5te "Usage: .*sip" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/sip-onetime-linux-armv5te
+          check_help sip-dialog-linux-armv5te "Usage: .*sip-dialog" qemu-arm -cpu arm926 -L /usr/arm-linux-gnueabi ./build/sip-dialog-linux-armv5te
+          check_help sip-onetime-linux-riscv64 "Usage: .*sip" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/sip-onetime-linux-riscv64
+          check_help sip-dialog-linux-riscv64 "Usage: .*sip-dialog" qemu-riscv64 -L /usr/riscv64-linux-gnu ./build/sip-dialog-linux-riscv64
 
           for binary in build/*-linux-*; do
             test -s "$binary"
           done
 
-          for binary in build/decode-linux-riscv64 build/sip-linux-riscv64; do
+          for binary in build/decode-linux-riscv64 build/sip-onetime-linux-riscv64 build/sip-dialog-linux-riscv64; do
             readelf -h "$binary" > /tmp/riscv64-elf.txt
             grep -q 'Class:.*ELF64' /tmp/riscv64-elf.txt
             grep -q 'Machine:.*RISC-V' /tmp/riscv64-elf.txt

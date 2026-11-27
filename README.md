@@ -1,21 +1,20 @@
 # textlite-px1000c
 
 Command-line tools for receiving and sending text over the audio modem in a
-TEXT LITE PX1000 C, plus a SIP responder that can answer calls with generated
-messages.
+TEXT LITE PX1000 C, plus one-time and interactive SIP responders.
 
 ## Quick start
 
 The easiest way to build is with the included Nix shell. It provides the
-compiler and libraries needed for all three programs:
+compiler and libraries needed for all four programs:
 
 ```sh
 nix-shell
 make
 ```
 
-`make` builds `decode` and `encode`. It also builds `sip` when PJSIP is
-available. To decode a recording or create a WAV message:
+`make` builds `decode` and `encode`. When PJSIP is available, it also builds
+`sip-onetime` and `sip-dialog`. To decode a recording or create a WAV message:
 
 ```sh
 ./decode recording.mp3
@@ -33,26 +32,28 @@ requirements.
 | --- | --- |
 | `decode` | FFmpeg, available as `ffmpeg` on `PATH` |
 | `encode` | None; eSpeak NG (`espeak-ng` on `PATH`) only when speech is enabled with `--speak` |
-| `sip` | The `encode` executable and `/bin/sh` for the configured command. A dynamically linked build also needs its PJSIP shared libraries and their runtime dependencies. |
+| `sip-onetime` | The `encode` executable and `/bin/sh` for the one-time command. A dynamically linked build also needs PJSIP shared libraries. |
+| `sip-dialog` | The `encode` executable and `/bin/sh` for the interactive command. It decodes received PCM in process, so it does not need FFmpeg. A dynamically linked build also needs PJSIP and pseudo-terminal runtime libraries. |
 
-The Pterodactyl egg installs `sip` and `encode` as static musl binaries, so
-that deployment does not need PJSIP shared libraries. It bundles eSpeak NG
-for the optional speech feature. `decode` is not part of the egg.
+The Pterodactyl egg installs the one-time `sip` compatibility target and
+`encode` as static musl binaries, so that deployment does not need PJSIP shared
+libraries. It bundles eSpeak NG for the optional speech feature. Neither
+`decode` nor `sip-dialog` is part of the egg.
 
 ### Compilation
 
 All programs are C11/POSIX programs. Building with the Makefile requires a C
 compiler and `make`; `decode` and `encode` also link the system math library.
-`make` includes `sip` when PJSIP development files are available.
+`make` includes both SIP responders when PJSIP development files are available.
 
 | Target | Additional build requirements |
 | --- | --- |
 | `decode`, `encode` | No project-specific libraries beyond the C compiler and math library |
-| `sip` | PJSIP development files (`libpjproject` headers and libraries), `pkg-config`, and POSIX threads; PJSIP's pkg-config metadata supplies its link flags |
+| `sip-onetime`, `sip-dialog` | PJSIP development files (`libpjproject` headers and libraries), `pkg-config`, and POSIX threads; `sip-dialog` also needs pseudo-terminal headers/library and compiles the decoder engine from `decode.c` |
 
 To run `make test`, also install Bash, Python 3, FFmpeg, eSpeak NG, and the
-PJSIP `pjsua` command-line client. The test target builds all three programs,
-so the `sip` compilation requirements apply as well.
+PJSIP `pjsua` command-line client. The test target builds the available SIP
+programs, so the PJSIP compilation requirements apply as well.
 
 ## Decode a recording
 
@@ -116,24 +117,42 @@ cc -std=c11 -O2 -Wall -Wextra encode.c -lm -o encode
 
 ## Answer calls with SIP
 
-`sip` registers one SIP account over UDP and answers one incoming call at a
-time. It runs a shell command, passes the command's standard output to
-`encode`, plays the resulting WAV into the call, and hangs up when playback
-finishes. Command output must be valid encoder input and is limited to 7,400
-bytes. A concurrent incoming call is rejected as busy.
+Both SIP programs register one SIP account over UDP and answer one incoming
+call at a time. They share the same SIP, network, and encoder options.
+`sip-onetime` runs a shell command once, sends its output, and hangs up when
+playback finishes. `sip-dialog` starts the command once per call, sends its
+initial output, then keeps the command running. It decodes each caller message,
+writes the text to the command's standard input, and plays new command output
+back to the caller. A concurrent incoming call is rejected as busy. The dialog
+ends when the caller hangs up or the command exits.
+
+Send `?repeat` as a message to replay the most recently sent command response.
+The request is handled by `sip-dialog` and is not passed to the command. Before
+the first response, it has no effect.
+
+Each decoded caller message is printed in escaped, one-line form as `Caller
+wrote: ...`; line endings appear as `\n`. The dialog responder removes one
+leading `(`, the default PX margin byte, before passing caller text to the
+interactive command.
+
+Before a command response is sent to the PX device, CR/CRLF line endings are
+normalized and all blank lines are removed, including lines containing only
+spaces or tabs. Indentation on nonblank lines is preserved. The normalized
+response is printed as `Sending to PX: ...` and is also the version replayed by
+`?repeat`.
 
 Build inside `nix-shell` (or another environment with PJSIP's
 `libpjproject` pkg-config metadata):
 
 ```sh
-cc -std=c11 -O2 -Wall -Wextra sip.c -o sip $(pkg-config --static --cflags --libs libpjproject) -pthread
+make sip-onetime sip-dialog
 ```
 
 Set the account password in the environment and start the responder:
 
 ```sh
 export SIP_PASSWORD='your-sip-password'
-./sip --registrar sip:pbx.example.net \
+./sip-onetime --registrar sip:pbx.example.net \
   --identity sip:1001@pbx.example.net --username 1001 \
   --command 'printf "%s\\n" "test abc123"' --encoder ./encode
 ```
@@ -141,6 +160,20 @@ export SIP_PASSWORD='your-sip-password'
 Required options are `--registrar`, `--identity`, `--username`, and
 `--command`. The password can instead be passed with `--password`. Useful
 network and encoder options are:
+
+To run an interactive program such as `adventure`, use the dialog responder:
+
+```sh
+./sip-dialog --registrar sip:pbx.example.net \
+  --identity sip:1001@pbx.example.net --username 1001 \
+  --command adventure --encoder ./encode
+```
+
+The command is launched through `/bin/sh -c` attached to a pseudo-terminal, so
+interactive programs flush prompts as they would in a terminal; terminal input
+echo is disabled. Its standard input receives each decoded message as text,
+and its standard output is sent to the caller after 500 ms without more output.
+Output is limited to 7,400 bytes per response.
 
 | Option | Purpose |
 | --- | --- |
@@ -158,17 +191,17 @@ network and encoder options are:
 
 The `--bind` address applies to SIP and RTP. When binding by interface name,
 the first listed IPv4 address is used. If the server is behind NAT, configure
-`--public-address` with an IPv4 address reachable by the SIP provider. `sip`
-disables VAD and echo cancellation and prioritizes waveform codecs so FSK
-tones are preserved. Stop it with Ctrl+C.
+`--public-address` with an IPv4 address reachable by the SIP provider. Both
+responders disable VAD and echo cancellation and prioritize waveform codecs so
+FSK tones are preserved. Stop either responder with Ctrl+C.
 
 ### Pterodactyl deployment
 
 Import [the SIP egg](pterodactyl/egg-sip.json) from Admin → Eggs → Import Egg.
 The installer clones the configured repository and branch, builds PJSIP 2.16
-and statically links `sip` and `encode` with musl. It also bundles eSpeak NG,
-its libraries, and voice data, so speech works without eSpeak NG in the
-runtime image.
+and statically links the one-time `sip` target and `encode` with musl. It also
+bundles eSpeak NG, its libraries, and voice data, so speech works without
+eSpeak NG in the runtime image.
 
 Allocate a UDP port for SIP and set it as the server's primary allocation.
 Also allocate the configured RTP port and the following port for RTCP. The
@@ -185,8 +218,9 @@ message before its modem transmission.
 
 ## Development
 
-The project has three POSIX C command-line programs: `decode`, `encode`, and
-`sip`. The Makefile builds the available programs and runs the test suite:
+The project has four POSIX C command-line programs: `decode`, `encode`,
+`sip-onetime`, and `sip-dialog`. The Makefile builds the available programs
+and runs the test suite:
 
 ```sh
 make
@@ -201,7 +235,8 @@ sync with code and configuration changes.
 
 ## Project files
 
-- `decode.c`, `encode.c`, `sip.c` — decoder, encoder, and SIP responder
+- `decode.c`, `decode.h`, `encode.c`, `sip-onetime.c`, `sip-dialog.c` — decoder,
+  encoder, one-time SIP responder, and interactive SIP responder
 - `Makefile` — local build and test targets
 - `LICENSE` — MIT license
 - `tests/` — test suite for the command-line tools

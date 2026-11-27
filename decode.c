@@ -11,6 +11,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "decode.h"
+
 enum {
     SAMPLE_RATE = 22050,
     FRAME_BITS = 11,
@@ -30,6 +32,7 @@ typedef struct {
     unsigned baud_rate;
 } Candidate;
 
+#ifndef DECODE_LIBRARY_ONLY
 static int read_ffmpeg_pcm(const char *path, int16_t **samples_out,
                            size_t *sample_count_out)
 {
@@ -148,6 +151,7 @@ static int read_ffmpeg_pcm(const char *path, int16_t **samples_out,
     *sample_count_out = count;
     return 0;
 }
+#endif
 
 static Symbol *demodulate(const int16_t *samples, size_t count,
                           size_t window_size,
@@ -309,7 +313,8 @@ static Candidate find_message(const Symbol *symbols, size_t symbol_count,
     return best;
 }
 
-static int print_message(const Candidate *candidate)
+static int format_message(const Candidate *candidate,
+                          unsigned char **text_out, size_t *length_out)
 {
     /* Skip synchronization NULs, translate line endings, and omit padding
        control bytes after the message. */
@@ -321,30 +326,80 @@ static int print_message(const Candidate *candidate)
                            || candidate->bytes[end - 1] == ' '))
         --end;
 
+    size_t capacity = end - begin + 2;
+    unsigned char *text = malloc(capacity);
+    if (text == NULL)
+        return -1;
+    size_t used = 0;
     int wrote = 0;
     int previous_cr = 0;
     for (size_t i = begin; i < end; ++i) {
         unsigned char c = candidate->bytes[i];
         if (c == '\r') {
-            putchar('\n');
+            text[used++] = '\n';
             previous_cr = 1;
             wrote = 1;
         } else if (c == '\n') {
             if (!previous_cr)
-                putchar('\n');
+                text[used++] = '\n';
             previous_cr = 0;
             wrote = 1;
         } else if (c == '\t' || (c >= 32 && c <= 126)) {
-            putchar(c);
+            text[used++] = c;
             previous_cr = 0;
             wrote = 1;
         }
     }
     if (wrote && (end == begin || candidate->bytes[end - 1] != '\r'))
-        putchar('\n');
-    return wrote;
+        text[used++] = '\n';
+    if (!wrote) {
+        free(text);
+        return 0;
+    }
+    *text_out = text;
+    *length_out = used;
+    return 1;
 }
 
+int decode_pcm_samples(const int16_t *samples, size_t sample_count,
+                       unsigned char **text_out, size_t *text_length_out,
+                       unsigned *baud_rate_out)
+{
+    const unsigned baud_rates[] = {300, 600, 1200};
+    Candidate message = {0};
+    for (size_t i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]); ++i) {
+        unsigned baud_rate = baud_rates[i];
+        size_t window_size = (size_t)llround((double)SAMPLE_RATE / baud_rate * 0.82);
+        if (baud_rate == 300)
+            window_size = 60;
+        else if (baud_rate == 1200)
+            window_size = 19;
+        size_t symbol_count = 0;
+        double max_rms = 0.0;
+        Symbol *symbols = demodulate(samples, sample_count, window_size,
+                                     &symbol_count, &max_rms);
+        if (symbols == NULL)
+            continue;
+        Candidate candidate = find_message(symbols, symbol_count, window_size,
+                                           max_rms, baud_rate);
+        free(symbols);
+        if (candidate.score > message.score) {
+            free(message.bytes);
+            message = candidate;
+        } else {
+            free(candidate.bytes);
+        }
+    }
+    if (message.bytes == NULL)
+        return -1;
+    int formatted = format_message(&message, text_out, text_length_out);
+    if (formatted > 0 && baud_rate_out != NULL)
+        *baud_rate_out = message.baud_rate;
+    free(message.bytes);
+    return formatted > 0 ? 0 : formatted == 0 ? 1 : -1;
+}
+
+#ifndef DECODE_LIBRARY_ONLY
 static void print_usage(const char *program)
 {
     fprintf(stderr, "Usage: %s [-v] [--] audio_file\n", program);
@@ -353,7 +408,6 @@ static void print_usage(const char *program)
     fprintf(stderr, "  --        Treat following arguments as the audio file path.\n");
     fprintf(stderr, "  audio_file  Input audio in any format supported by FFmpeg.\n");
 }
-
 int main(int argc, char **argv)
 {
     const char *input_path = NULL;
@@ -385,45 +439,25 @@ int main(int argc, char **argv)
     if (read_ffmpeg_pcm(input_path, &samples, &sample_count) != 0)
         return 1;
 
-    /* Try each selectable modem speed with a bit window sized for that rate. */
-    const unsigned baud_rates[] = {300, 600, 1200};
-    Candidate message = {0};
-    for (size_t i = 0; i < sizeof(baud_rates) / sizeof(baud_rates[0]); ++i) {
-        unsigned baud_rate = baud_rates[i];
-        size_t window_size = (size_t)llround((double)SAMPLE_RATE / baud_rate * 0.82);
-        if (baud_rate == 300)
-            window_size = 60;
-        else if (baud_rate == 1200)
-            window_size = 19;
-        size_t symbol_count = 0;
-        double max_rms = 0.0;
-        Symbol *symbols = demodulate(samples, sample_count, window_size,
-                                     &symbol_count, &max_rms);
-        if (symbols == NULL)
-            continue;
-        Candidate candidate = find_message(symbols, symbol_count, window_size,
-                                           max_rms, baud_rate);
-        free(symbols);
-        if (candidate.score > message.score) {
-            free(message.bytes);
-            message = candidate;
-        } else {
-            free(candidate.bytes);
-        }
-    }
+    unsigned char *text = NULL;
+    size_t text_length = 0;
+    unsigned baud_rate = 0;
+    int decode_result = decode_pcm_samples(samples, sample_count, &text,
+                                           &text_length, &baud_rate);
     free(samples);
-    if (message.bytes == NULL) {
+    if (decode_result < 0) {
         fprintf(stderr, "No valid TEXT LITE PX1000 C transmission was found.\n");
+        return 1;
+    }
+    if (decode_result > 0) {
+        fprintf(stderr, "The transmission contains valid data, but no printable text was found.\n");
         return 1;
     }
 
     if (verbose)
-        fprintf(stderr, "Detected transmission at %u baud.\n", message.baud_rate);
-    int wrote = print_message(&message);
-    free(message.bytes);
-    if (!wrote) {
-        fprintf(stderr, "The transmission contains valid data, but no printable text was found.\n");
-        return 1;
-    }
+        fprintf(stderr, "Detected transmission at %u baud.\n", baud_rate);
+    fwrite(text, 1, text_length, stdout);
+    free(text);
     return 0;
 }
+#endif
